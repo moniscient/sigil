@@ -4,7 +4,7 @@
 /* ── Keyword Tables ──────────────────────────────────────────────── */
 
 static const char *structural_keywords[] = {
-    "fn", "returns", "return", "repeats", "begin", "end", "text",
+    "fn", "returns", "return", "repeats", "begin", "end",
     "if", "elif", "else", "while", "for", "in",
     "match", "case", "default",
     "let", "var", "assign",
@@ -189,6 +189,58 @@ Token tokenizer_next(Tokenizer *t) {
         return tok;
     }
 
+    /* String literal: "..." or """...""" */
+    if (cp == '"') {
+        /* Check for triple-quote """...""" */
+        if (t->source[t->pos + 1] == '"' && t->source[t->pos + 2] == '"') {
+            advance(t, 3); /* skip opening """ */
+            int start = t->pos;
+            while (t->source[t->pos]) {
+                if (t->source[t->pos] == '"' && t->source[t->pos + 1] == '"' && t->source[t->pos + 2] == '"') {
+                    int content_len = t->pos - start;
+                    const char *content = intern(t->intern_tab, t->source + start, content_len);
+                    advance(t, 3); /* skip closing """ */
+                    return make_token(TOK_STRING_LIT, content, loc);
+                }
+                advance(t, 1);
+            }
+            error_add(t->errors, ERR_LEXER, loc, "unterminated triple-quoted string");
+            const char *content = intern(t->intern_tab, t->source + start, t->pos - start);
+            return make_token(TOK_STRING_LIT, content, loc);
+        }
+        /* Single-quoted string "..." */
+        advance(t, 1); /* skip opening " */
+        /* Build escaped content into temp buffer */
+        char buf[4096];
+        int bi = 0;
+        while (t->source[t->pos] && t->source[t->pos] != '"' && t->source[t->pos] != '\n') {
+            if (t->source[t->pos] == '\\' && t->source[t->pos + 1]) {
+                advance(t, 1); /* skip backslash */
+                char esc = t->source[t->pos];
+                switch (esc) {
+                    case 'n':  if (bi < 4095) buf[bi++] = '\n'; break;
+                    case 't':  if (bi < 4095) buf[bi++] = '\t'; break;
+                    case 'r':  if (bi < 4095) buf[bi++] = '\r'; break;
+                    case '\\': if (bi < 4095) buf[bi++] = '\\'; break;
+                    case '"':  if (bi < 4095) buf[bi++] = '"';  break;
+                    default:   if (bi < 4094) { buf[bi++] = '\\'; buf[bi++] = esc; } break;
+                }
+                advance(t, 1);
+            } else {
+                if (bi < 4095) buf[bi++] = t->source[t->pos];
+                advance(t, 1);
+            }
+        }
+        buf[bi] = '\0';
+        if (t->source[t->pos] == '"') {
+            advance(t, 1); /* skip closing " */
+        } else {
+            error_add(t->errors, ERR_LEXER, loc, "unterminated string literal");
+        }
+        const char *content = intern(t->intern_tab, buf, bi);
+        return make_token(TOK_STRING_LIT, content, loc);
+    }
+
     /* ASCII alphanumeric: keyword or identifier */
     if (cc == CHARCLASS_ASCII_ALNUM) {
         int start = t->pos;
@@ -197,32 +249,7 @@ Token tokenizer_next(Tokenizer *t) {
         int len = t->pos - start;
         const char *text = intern(t->intern_tab, t->source + start, len);
 
-        if (strcmp(text, "text") == 0 && t->source[t->pos] == '\n') {
-            /* text\n...\nend — raw string capture */
-            advance(t, 1); /* skip the \n */
-            int start = t->pos;
-            const char *end_marker = "\nend";
-            int end_len = 4;
-            while (t->source[t->pos]) {
-                if (strncmp(t->source + t->pos, end_marker, end_len) == 0) {
-                    /* Check that 'end' is followed by whitespace/newline/EOF */
-                    char after = t->source[t->pos + end_len];
-                    if (after == '\0' || after == '\n' || after == ' ' || after == '\t' || after == '\r') {
-                        int content_len = t->pos - start;
-                        const char *content = intern(t->intern_tab, t->source + start, content_len);
-                        /* advance past \nend */
-                        for (int i = 0; i < end_len; i++) advance(t, 1);
-                        return make_token(TOK_STRING_LIT, content, loc);
-                    }
-                }
-                advance(t, 1);
-            }
-            /* Unterminated string */
-            error_add(t->errors, ERR_LEXER, loc, "unterminated text literal (missing \\nend)");
-            const char *content = intern(t->intern_tab, t->source + start, t->pos - start);
-            return make_token(TOK_STRING_LIT, content, loc);
-        }
-        if (strcmp(text, "begin") == 0)
+if (strcmp(text, "begin") == 0)
             return make_token(TOK_BEGIN, text, loc);
         if (strcmp(text, "end") == 0)
             return make_token(TOK_END, text, loc);

@@ -121,7 +121,18 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
             break;
 
         case NODE_STRING_LIT:
-            fprintf(e->out, "text\n%s\nend", node->string_lit.str_val);
+            fprintf(e->out, "\"");
+            for (const char *s = node->string_lit.str_val; *s; s++) {
+                switch (*s) {
+                    case '"':  fprintf(e->out, "\\\""); break;
+                    case '\\': fprintf(e->out, "\\\\"); break;
+                    case '\n': fprintf(e->out, "\\n"); break;
+                    case '\t': fprintf(e->out, "\\t"); break;
+                    case '\r': fprintf(e->out, "\\r"); break;
+                    default:   fputc(*s, e->out); break;
+                }
+            }
+            fprintf(e->out, "\"");
             break;
 
         case NODE_LET:

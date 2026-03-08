@@ -729,13 +729,26 @@ fi
 
 echo "--- String literals ---"
 
-run_test "string_simple" "$(printf 'let s text\nhello world\nend\nprint s')" "hello world"
+run_test "string_simple" 'let s "hello world"
+print s' "hello world"
 
-run_test "string_multiline" "$(printf 'let s text\nline one\nline two\nend\nprint s')" "$(printf 'line one\nline two')"
+run_test "string_escape" 'let s "line one\nline two"
+print s' "$(printf 'line one\nline two')"
 
-run_test "string_length" "$(printf 'let s text\nhello\nend\nlet n length s\nprint n')" "5"
+run_test "string_length" 'let s "hello"
+let n length s
+print n' "5"
 
-run_test "string_get_char" "$(printf 'let s text\nhello\nend\nlet c get s 0\nprint c')" "h"
+run_test "string_get_char" 'let s "hello"
+let c get s 0
+print c' "h"
+
+run_test "string_comment" '"this is a comment"
+print 42' "42"
+
+run_test "string_triple_quote" 'let s """hello
+world"""
+print s' "$(printf 'hello\nworld')"
 
 echo "--- New builtins ---"
 

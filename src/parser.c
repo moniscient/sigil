@@ -884,6 +884,12 @@ ASTNode *parse_statement(Parser *p) {
         return n;
     }
 
+    /* Standalone string literal: treat as comment, skip */
+    if (t->kind == TOK_STRING_LIT) {
+        eat(p);
+        return NULL;
+    }
+
     /* begin/end block */
     if (t->kind == TOK_BEGIN) {
         return parse_begin_end(p);
