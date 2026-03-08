@@ -1,0 +1,4 @@
+fn add int a int b returns int
+let x 10
+let y 20
+let z begin add x y end
