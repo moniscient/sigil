@@ -99,7 +99,7 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
                 fprintf(e->out, " ");
                 ASTNode *arg = node->call.args.items[i];
                 if (arg->kind == NODE_CALL) {
-                    fprintf(e->out, "begin ");
+                    fprintf(e->out, "do ");
                     skw_emit(e, arg);
                     fprintf(e->out, " end");
                 } else if (arg->kind == NODE_BEGIN_END) {
@@ -255,7 +255,7 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
             break;
 
         case NODE_BEGIN_END:
-            fprintf(e->out, "begin ");
+            fprintf(e->out, "do ");
             for (int i = 0; i < node->block.stmts.count; i++) {
                 if (i > 0) fprintf(e->out, " ");
                 skw_emit(e, node->block.stmts.items[i]);
@@ -360,6 +360,21 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
             }
             fprintf(e->out, " apply ");
             skw_emit(e, node->comprehension.comp_transform);
+            break;
+
+        case NODE_BREAK:
+            emit_indent(e);
+            fprintf(e->out, "break");
+            break;
+
+        case NODE_CONTINUE:
+            emit_indent(e);
+            fprintf(e->out, "continue");
+            break;
+
+        case NODE_ALIAS:
+            emit_indent(e);
+            fprintf(e->out, "alias %s %s", node->alias.alias_from, node->alias.alias_to);
             break;
 
         case NODE_PARAM:

@@ -111,4 +111,30 @@ void sigil_print_string(SigilMap *m);
 
 SigilMap *sigil_string_from_utf8(const char *s, int len);
 
+/* ── String Operations ───────────────────────────────────────────── */
+
+SigilMap *sigil_string_concat(SigilMap *a, SigilMap *b);
+
+/* ── Map Operations (extended) ───────────────────────────────────── */
+
+SigilMap *sigil_map_copy(SigilMap *m);
+void sigil_map_append(SigilMap *m, SigilVal val);
+void sigil_print_map(SigilMap *m);
+SigilMap *sigil_map_keys(SigilMap *m);
+SigilMap *sigil_map_values(SigilMap *m);
+
+/* ── Row/Matrix Constructors ─────────────────────────────────────── */
+
+SigilMap *sigil_row(SigilVal first, int _repeats_count, SigilVal *_repeats_data);
+SigilMap *sigil_matrix(SigilVal first, int _repeats_count, SigilVal *_repeats_data);
+
+/* ── Type Conversions ────────────────────────────────────────────── */
+
+int64_t sigil_to_int(double v);
+double sigil_to_float(int64_t v);
+SigilMap *sigil_int_to_string(int64_t v);
+SigilMap *sigil_float_to_string(double v);
+SigilMap *sigil_bool_to_string(bool v);
+SigilMap *sigil_char_to_string(uint32_t v);
+
 #endif /* SIGIL_RUNTIME_H */

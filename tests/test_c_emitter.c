@@ -181,7 +181,7 @@ static void test_return(void) {
     printf("--- Return ---\n");
     char *c = emit_c_from_skw(
         "fn double int a returns int\n"
-        "  begin return begin add a a end end");
+        "  begin return do add a a end end");
     /* begin/end wraps the add call in a stmt expr */
     ASSERT(strstr(c, "return ({") != NULL, "return emits C return with stmt expr");
     ASSERT(strstr(c, "(a + a)") != NULL, "return body has add");
@@ -190,84 +190,84 @@ static void test_return(void) {
 
 static void test_builtin_add(void) {
     printf("--- Builtin: add ---\n");
-    char *c = emit_c_from_skw("let x begin add 3 4 end");
+    char *c = emit_c_from_skw("let x do add 3 4 end");
     ASSERT(strstr(c, "(3LL + 4LL)") != NULL, "add desugars to + operator");
     free(c);
 }
 
 static void test_builtin_subtract(void) {
     printf("--- Builtin: subtract ---\n");
-    char *c = emit_c_from_skw("let x begin subtract 10 3 end");
+    char *c = emit_c_from_skw("let x do subtract 10 3 end");
     ASSERT(strstr(c, "(10LL - 3LL)") != NULL, "subtract desugars to - operator");
     free(c);
 }
 
 static void test_builtin_multiply(void) {
     printf("--- Builtin: multiply ---\n");
-    char *c = emit_c_from_skw("let x begin multiply 5 6 end");
+    char *c = emit_c_from_skw("let x do multiply 5 6 end");
     ASSERT(strstr(c, "(5LL * 6LL)") != NULL, "multiply desugars to * operator");
     free(c);
 }
 
 static void test_builtin_divide(void) {
     printf("--- Builtin: divide ---\n");
-    char *c = emit_c_from_skw("let x begin divide 10 2 end");
+    char *c = emit_c_from_skw("let x do divide 10 2 end");
     ASSERT(strstr(c, "(10LL / 2LL)") != NULL, "divide desugars to / operator");
     free(c);
 }
 
 static void test_builtin_modulo(void) {
     printf("--- Builtin: modulo ---\n");
-    char *c = emit_c_from_skw("let x begin modulo 10 3 end");
+    char *c = emit_c_from_skw("let x do modulo 10 3 end");
     ASSERT(strstr(c, "(10LL % 3LL)") != NULL, "modulo desugars to % operator");
     free(c);
 }
 
 static void test_builtin_equal(void) {
     printf("--- Builtin: equal ---\n");
-    char *c = emit_c_from_skw("let x begin equal 1 1 end");
+    char *c = emit_c_from_skw("let x do equal 1 1 end");
     ASSERT(strstr(c, "(1LL == 1LL)") != NULL, "equal desugars to == operator");
     free(c);
 }
 
 static void test_builtin_less(void) {
     printf("--- Builtin: less ---\n");
-    char *c = emit_c_from_skw("let x begin less 1 2 end");
+    char *c = emit_c_from_skw("let x do less 1 2 end");
     ASSERT(strstr(c, "(1LL < 2LL)") != NULL, "less desugars to < operator");
     free(c);
 }
 
 static void test_builtin_greater(void) {
     printf("--- Builtin: greater ---\n");
-    char *c = emit_c_from_skw("let x begin greater 2 1 end");
+    char *c = emit_c_from_skw("let x do greater 2 1 end");
     ASSERT(strstr(c, "(2LL > 1LL)") != NULL, "greater desugars to > operator");
     free(c);
 }
 
 static void test_builtin_and(void) {
     printf("--- Builtin: and ---\n");
-    char *c = emit_c_from_skw("let x begin and true false end");
+    char *c = emit_c_from_skw("let x do and true false end");
     ASSERT(strstr(c, "(true && false)") != NULL, "and desugars to && operator");
     free(c);
 }
 
 static void test_builtin_or(void) {
     printf("--- Builtin: or ---\n");
-    char *c = emit_c_from_skw("let x begin or true false end");
+    char *c = emit_c_from_skw("let x do or true false end");
     ASSERT(strstr(c, "(true || false)") != NULL, "or desugars to || operator");
     free(c);
 }
 
 static void test_builtin_negate(void) {
     printf("--- Builtin: negate ---\n");
-    char *c = emit_c_from_skw("let x begin negate 5 end");
+    char *c = emit_c_from_skw("let x do negate 5 end");
     ASSERT(strstr(c, "(-5LL)") != NULL, "negate desugars to unary minus");
     free(c);
 }
 
 static void test_builtin_not(void) {
     printf("--- Builtin: not ---\n");
-    char *c = emit_c_from_skw("let x begin not true end");
+    char *c = emit_c_from_skw("let x do not true end");
     ASSERT(strstr(c, "(!true)") != NULL, "not desugars to unary !");
     free(c);
 }
@@ -281,7 +281,7 @@ static void test_builtin_print(void) {
 
 static void test_nested_builtins(void) {
     printf("--- Nested builtin calls ---\n");
-    char *c = emit_c_from_skw("let x begin add 1 begin multiply 2 3 end end");
+    char *c = emit_c_from_skw("let x do add 1 do multiply 2 3 end end");
     /* begin/end wraps inner multiply, producing stmt expr */
     ASSERT(strstr(c, "(1LL + (") != NULL, "nested add has inner multiply");
     free(c);
@@ -318,8 +318,8 @@ static void test_while_loop(void) {
     printf("--- While loop ---\n");
     char *c = emit_c_from_skw(
         "var i 0\n"
-        "while begin less i 10 end begin\n"
-        "  assign i begin add i 1 end\n"
+        "while do less i 10 end begin\n"
+        "  assign i do add i 1 end\n"
         "end");
     ASSERT(strstr(c, "while (") != NULL, "while emits C while");
     ASSERT(strstr(c, "i = ({") != NULL, "while body has assign with stmt expr");
@@ -361,7 +361,7 @@ static void test_match(void) {
 
 static void test_begin_end_stmt_expr(void) {
     printf("--- Begin/end (statement expression) ---\n");
-    char *c = emit_c_from_skw("let x begin add 1 2 end");
+    char *c = emit_c_from_skw("let x do add 1 2 end");
     ASSERT(strstr(c, "({") != NULL, "begin/end emits GCC stmt expr opening");
     ASSERT(strstr(c, "})") != NULL, "begin/end emits GCC stmt expr closing");
     free(c);
@@ -371,7 +371,7 @@ static void test_fn_declaration_simple(void) {
     printf("--- Fn declaration (simple) ---\n");
     char *c = emit_c_from_skw(
         "fn double int a returns int\n"
-        "  begin return begin add a a end end");
+        "  begin return do add a a end end");
     ASSERT(strstr(c, "int64_t sigil_double(int64_t a)") != NULL, "fn prototype with sigil_ prefix");
     ASSERT(strstr(c, "return ({") != NULL, "fn body has return with stmt expr");
     ASSERT(strstr(c, "(a + a)") != NULL, "fn body has add(a,a)");
@@ -391,7 +391,7 @@ static void test_fn_multiple_params(void) {
     printf("--- Fn multiple params ---\n");
     char *c = emit_c_from_skw(
         "fn triple int a int b int c returns int\n"
-        "  begin return begin add a begin add b c end end end");
+        "  begin return do add a do add b c end end end");
     ASSERT(strstr(c, "int64_t sigil_triple(int64_t a, int64_t b, int64_t c)") != NULL,
            "fn with 3 params");
     free(c);
@@ -401,7 +401,7 @@ static void test_fn_var_param(void) {
     printf("--- Fn var (mutable) param ---\n");
     char *c = emit_c_from_skw(
         "fn inc var int x returns void\n"
-        "  begin assign x begin add x 1 end end");
+        "  begin assign x do add x 1 end end");
     /* var param should become pointer */
     ASSERT(strstr(c, "int64_t *x") != NULL, "var param emits pointer type");
     free(c);
@@ -411,7 +411,7 @@ static void test_fn_call_var_param(void) {
     printf("--- Call to fn with var param ---\n");
     char *c = emit_c_from_skw(
         "fn inc var int x returns void\n"
-        "  assign x begin add x 1 end\n"
+        "  assign x do add x 1 end\n"
         "var n 5\n"
         "inc n");
     ASSERT(strstr(c, "sigil_inc(&n)") != NULL, "call passes &arg for var param");
@@ -424,7 +424,7 @@ static void test_fn_two_pass(void) {
         "fn alpha int a returns int\n"
         "  begin return a end\n"
         "fn beta int b returns int\n"
-        "  begin return begin alpha b end end");
+        "  begin return do alpha b end end");
     /* Prototypes should appear before bodies */
     char *proto_alpha = strstr(c, "int64_t sigil_alpha(int64_t a);");
     char *proto_beta  = strstr(c, "int64_t sigil_beta(int64_t b);");
@@ -443,7 +443,7 @@ static void test_builtin_fn_no_prototype(void) {
     /* Bodyless fns with builtin names should not emit prototypes */
     char *c = emit_c_from_skw(
         "fn add int a int b returns int\n"
-        "let x begin add 1 2 end");
+        "let x do add 1 2 end");
     ASSERT(strstr(c, "sigil_add(") == NULL, "no sigil_add prototype for builtin");
     ASSERT(strstr(c, "(1LL + 2LL)") != NULL, "add still resolves to + operator");
     free(c);
@@ -562,7 +562,7 @@ static void test_if_with_condition_expr(void) {
     printf("--- If with complex condition ---\n");
     char *c = emit_c_from_skw(
         "let a 10\n"
-        "if begin greater a 5 end begin\n"
+        "if do greater a 5 end begin\n"
         "  print a\n"
         "end");
     ASSERT(strstr(c, "if (({") != NULL, "if condition is statement expression");
@@ -575,9 +575,9 @@ static void test_while_with_mutation(void) {
     char *c = emit_c_from_skw(
         "var sum 0\n"
         "var i 1\n"
-        "while begin less i 4 end begin\n"
-        "  assign sum begin add sum i end\n"
-        "  assign i begin add i 1 end\n"
+        "while do less i 4 end begin\n"
+        "  assign sum do add sum i end\n"
+        "  assign i do add i 1 end\n"
         "end\n"
         "print sum");
     ASSERT(strstr(c, "while (") != NULL, "while loop present");
@@ -603,8 +603,8 @@ static void test_fn_body_with_if(void) {
     char *c = emit_c_from_skw(
         "fn abs int x returns int\n"
         "  begin\n"
-        "    if begin less x 0 end begin\n"
-        "      return begin negate x end\n"
+        "    if do less x 0 end begin\n"
+        "      return do negate x end\n"
         "    end else begin\n"
         "      return x\n"
         "    end\n"
@@ -620,9 +620,9 @@ static void test_fn_calling_fn(void) {
     printf("--- Fn calling another fn ---\n");
     char *c = emit_c_from_skw(
         "fn double int a returns int\n"
-        "  begin return begin add a a end end\n"
+        "  begin return do add a a end end\n"
         "fn quadruple int a returns int\n"
-        "  begin return begin double begin double a end end end");
+        "  begin return do double do double a end end end");
     /* Nested calls wrapped in stmt exprs: sigil_double(({ sigil_double(a); })) */
     ASSERT(strstr(c, "sigil_double(") != NULL, "fn calls fn with sigil_ prefix");
     ASSERT(strstr(c, "sigil_double(a)") != NULL, "inner call to double(a)");
@@ -635,7 +635,7 @@ static void test_multiple_let_bindings(void) {
         "let a 1\n"
         "let b 2\n"
         "let c 3\n"
-        "let d begin add a begin add b c end end");
+        "let d do add a do add b c end end");
     ASSERT(strstr(c, "const int64_t a = 1LL;") != NULL, "a bound");
     ASSERT(strstr(c, "const int64_t b = 2LL;") != NULL, "b bound");
     ASSERT(strstr(c, "const int64_t c = 3LL;") != NULL, "c bound");
@@ -647,7 +647,7 @@ static void test_multiple_let_bindings(void) {
 static void test_deeply_nested_begin_end(void) {
     printf("--- Deeply nested begin/end ---\n");
     char *c = emit_c_from_skw(
-        "let x begin add begin add 1 2 end begin add 3 4 end end");
+        "let x do add do add 1 2 end do add 3 4 end end");
     ASSERT(strstr(c, "(1LL + 2LL)") != NULL, "deeply nested: inner add(1,2)");
     ASSERT(strstr(c, "(3LL + 4LL)") != NULL, "deeply nested: inner add(3,4)");
     free(c);
@@ -684,7 +684,7 @@ static void test_fn_with_bool_param(void) {
 
 static void test_let_with_bool_expr(void) {
     printf("--- Let with bool expression ---\n");
-    char *c = emit_c_from_skw("let ok begin and true begin not false end end");
+    char *c = emit_c_from_skw("let ok do and true do not false end end");
     /* and/not are builtins not in fn_registry, so type infers as UNKNOWN -> int64_t */
     ASSERT(strstr(c, "ok = ({") != NULL, "let ok has stmt expr value");
     ASSERT(strstr(c, "true && (") != NULL, "and(true, ...) produces &&");
@@ -713,7 +713,7 @@ static void test_var_param_deref(void) {
     printf("--- Var param dereference ---\n");
     char *c = emit_c_from_skw(
         "fn inc var int x returns void\n"
-        "  begin assign x begin add x 1 end end");
+        "  begin assign x do add x 1 end end");
     ASSERT(strstr(c, "int64_t *x") != NULL, "var param is pointer");
     ASSERT(strstr(c, "(*x) = ") != NULL, "assign to var param dereferences");
     ASSERT(strstr(c, "((*x) + 1LL)") != NULL, "var param read dereferences");
@@ -724,7 +724,7 @@ static void test_overload_mangling(void) {
     printf("--- Overload name mangling ---\n");
     char *c = emit_c_from_skw(
         "fn double int a returns int\n"
-        "  begin return begin add a a end end\n"
+        "  begin return do add a a end end\n"
         "fn double float a returns float\n"
         "  begin return a end");
     ASSERT(strstr(c, "sigil_double_int") != NULL, "int overload is mangled");
@@ -780,7 +780,7 @@ static void test_map_set(void) {
 
 static void test_map_get(void) {
     printf("--- map get ---\n");
-    char *c = emit_c_from_skw("var m mapnew\nlet v begin get m 1 end");
+    char *c = emit_c_from_skw("var m mapnew\nlet v do get m 1 end");
     ASSERT(strstr(c, "sigil_map_get(m, sigil_val_int(1LL))") != NULL,
            "get emits sigil_map_get with boxed key");
     free(c);
@@ -788,7 +788,7 @@ static void test_map_get(void) {
 
 static void test_map_has(void) {
     printf("--- map has ---\n");
-    char *c = emit_c_from_skw("var m mapnew\nlet b begin has m 1 end");
+    char *c = emit_c_from_skw("var m mapnew\nlet b do has m 1 end");
     ASSERT(strstr(c, "sigil_map_has(m, sigil_val_int(1LL))") != NULL,
            "has emits sigil_map_has with boxed key");
     free(c);
@@ -804,7 +804,7 @@ static void test_map_remove(void) {
 
 static void test_map_count(void) {
     printf("--- map mapcount ---\n");
-    char *c = emit_c_from_skw("var m mapnew\nlet n begin mapcount m end");
+    char *c = emit_c_from_skw("var m mapnew\nlet n do mapcount m end");
     ASSERT(strstr(c, "sigil_map_count(m)") != NULL,
            "mapcount emits sigil_map_count");
     free(c);
@@ -812,7 +812,7 @@ static void test_map_count(void) {
 
 static void test_map_get_float_val(void) {
     printf("--- map get with float values ---\n");
-    char *c = emit_c_from_skw("var m mapnew\nset m 1 3.14\nlet v begin get m 1 end");
+    char *c = emit_c_from_skw("var m mapnew\nset m 1 3.14\nlet v do get m 1 end");
     ASSERT(strstr(c, "sigil_val_float(3.14)") != NULL, "set boxes float value");
     ASSERT(strstr(c, "sigil_unbox_float(") != NULL, "get unboxes to float");
     free(c);
@@ -820,7 +820,7 @@ static void test_map_get_float_val(void) {
 
 static void test_map_get_bool_val(void) {
     printf("--- map get with bool values ---\n");
-    char *c = emit_c_from_skw("var m mapnew\nset m 1 true\nlet v begin get m 1 end");
+    char *c = emit_c_from_skw("var m mapnew\nset m 1 true\nlet v do get m 1 end");
     ASSERT(strstr(c, "sigil_val_bool(true)") != NULL, "set boxes bool value");
     ASSERT(strstr(c, "sigil_unbox_bool(") != NULL, "get unboxes to bool");
     free(c);
@@ -830,7 +830,7 @@ static void test_map_typed_fn_param(void) {
     printf("--- map as typed fn param ---\n");
     char *c = emit_c_from_skw(
         "fn total map int int m int key returns int\n"
-        "  begin return begin get m key end end");
+        "  begin return do get m key end end");
     ASSERT(strstr(c, "SigilMap* m") != NULL, "map param emits SigilMap*");
     ASSERT(strstr(c, "sigil_unbox_int(") != NULL, "get from map int int unboxes to int");
     free(c);
@@ -851,7 +851,7 @@ static void test_mono_identity_int(void) {
     char *c = emit_c_from_skw(
         "fn identity T x returns T\n"
         "  begin return x end\n"
-        "let a begin identity 42 end");
+        "let a do identity 42 end");
     ASSERT(strstr(c, "sigil_identity_int") != NULL, "mono identity int exists");
     ASSERT(strstr(c, "int64_t sigil_identity_int(int64_t x)") != NULL, "mono identity int signature");
     free(c);
@@ -862,7 +862,7 @@ static void test_mono_identity_float(void) {
     char *c = emit_c_from_skw(
         "fn identity T x returns T\n"
         "  begin return x end\n"
-        "let a begin identity 3.14 end");
+        "let a do identity 3.14 end");
     ASSERT(strstr(c, "sigil_identity_float") != NULL, "mono identity float exists");
     ASSERT(strstr(c, "double sigil_identity_float(double x)") != NULL, "mono identity float signature");
     free(c);
@@ -873,8 +873,8 @@ static void test_mono_identity_both(void) {
     char *c = emit_c_from_skw(
         "fn identity T x returns T\n"
         "  begin return x end\n"
-        "let a begin identity 42 end\n"
-        "let b begin identity 3.14 end");
+        "let a do identity 42 end\n"
+        "let b do identity 3.14 end");
     ASSERT(strstr(c, "sigil_identity_int") != NULL, "mono identity int present");
     ASSERT(strstr(c, "sigil_identity_float") != NULL, "mono identity float present");
     free(c);
@@ -885,7 +885,7 @@ static void test_mono_no_generic_standalone(void) {
     char *c = emit_c_from_skw(
         "fn identity T x returns T\n"
         "  begin return x end\n"
-        "let a begin identity 42 end");
+        "let a do identity 42 end");
     /* Should NOT have a generic version with T suffix */
     ASSERT(strstr(c, "sigil_identity_T") == NULL, "no standalone generic fn emitted");
     free(c);
@@ -1000,6 +1000,97 @@ int main(void) {
     test_mono_identity_both();
     test_mono_no_generic_standalone();
     test_mono_uncalled_generic();
+
+    /* Break / Continue */
+    printf("\n--- Break ---\n");
+    {
+        char *c = emit_c_from_skw("while true begin\n  break\nend");
+        ASSERT(strstr(c, "break;") != NULL, "break emits C break");
+        free(c);
+    }
+
+    printf("--- Continue ---\n");
+    {
+        char *c = emit_c_from_skw("while true begin\n  continue\nend");
+        ASSERT(strstr(c, "continue;") != NULL, "continue emits C continue");
+        free(c);
+    }
+
+    /* Map extended ops */
+    printf("--- Append ---\n");
+    {
+        char *c = emit_c_from_skw("var m mapnew\nappend m 42");
+        ASSERT(strstr(c, "sigil_map_append(") != NULL, "append emits sigil_map_append");
+        free(c);
+    }
+
+    printf("--- Clone ---\n");
+    {
+        char *c = emit_c_from_skw("var m mapnew\nlet m2 clone m");
+        ASSERT(strstr(c, "sigil_map_copy(") != NULL, "clone emits sigil_map_copy");
+        free(c);
+    }
+
+    printf("--- Keys ---\n");
+    {
+        char *c = emit_c_from_skw("var m mapnew\nlet k keys m");
+        ASSERT(strstr(c, "sigil_map_keys(") != NULL, "keys emits sigil_map_keys");
+        free(c);
+    }
+
+    printf("--- Values ---\n");
+    {
+        char *c = emit_c_from_skw("var m mapnew\nlet v values m");
+        ASSERT(strstr(c, "sigil_map_values(") != NULL, "values emits sigil_map_values");
+        free(c);
+    }
+
+    printf("--- Concat ---\n");
+    {
+        char *c = emit_c_from_skw("let a \"hello\"\nlet b \"world\"\nlet c concat a b");
+        ASSERT(strstr(c, "sigil_string_concat(") != NULL, "concat emits sigil_string_concat");
+        free(c);
+    }
+
+    /* Type conversions */
+    printf("--- to_int ---\n");
+    {
+        char *c = emit_c_from_skw("let x to_int 3.14");
+        ASSERT(strstr(c, "sigil_to_int(") != NULL, "to_int emits sigil_to_int");
+        free(c);
+    }
+
+    printf("--- to_float ---\n");
+    {
+        char *c = emit_c_from_skw("let x to_float 42");
+        ASSERT(strstr(c, "sigil_to_float(") != NULL, "to_float emits sigil_to_float");
+        free(c);
+    }
+
+    printf("--- to_string ---\n");
+    {
+        char *c = emit_c_from_skw("let s to_string 42");
+        ASSERT(strstr(c, "sigil_int_to_string(") != NULL, "to_string int emits sigil_int_to_string");
+        free(c);
+    }
+
+    /* Invoke */
+    printf("--- Invoke ---\n");
+    {
+        char *c = emit_c_from_skw(
+            "let f lambda int x returns int begin return do add x 1 end end\n"
+            "let r invoke f 5");
+        ASSERT(strstr(c, "fn_ptr") != NULL, "invoke emits fn_ptr cast/call");
+        free(c);
+    }
+
+    /* Print map */
+    printf("--- Print map ---\n");
+    {
+        char *c = emit_c_from_skw("var m mapnew\nset m 1 42\nprint m");
+        ASSERT(strstr(c, "sigil_print_map(") != NULL, "print map emits sigil_print_map");
+        free(c);
+    }
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

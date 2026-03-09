@@ -30,6 +30,9 @@ bool types_equal(TypeRef *a, TypeRef *b) {
         case TYPE_TRAIT_BOUND:
             return a->name == b->name && a->trait_name == b->trait_name;
         case TYPE_MAP:
+            /* A bare map (no key/val subtypes) is equal to any map */
+            if (!a->key_type && !a->val_type) return true;
+            if (!b->key_type && !b->val_type) return true;
             return types_equal(a->key_type, b->key_type) &&
                    types_equal(a->val_type, b->val_type);
         case TYPE_FN:
@@ -197,6 +200,21 @@ void type_checker_register_fn(TypeChecker *tc, ASTNode *fn_node) {
         }
     }
 
+    /* Check for PAT_REPEATS in pattern */
+    e->has_repeats = false;
+    e->repeats_start_idx = pc; /* default: after all params */
+    for (int i = 0; i < fn_node->fn_decl.pattern.count; i++) {
+        if (fn_node->fn_decl.pattern.items[i].kind == PAT_REPEATS) {
+            e->has_repeats = true;
+            /* Count PAT_PARAM elements before this PAT_REPEATS */
+            int ri = 0;
+            for (int j = 0; j < i; j++)
+                if (fn_node->fn_decl.pattern.items[j].kind == PAT_PARAM) ri++;
+            e->repeats_start_idx = ri;
+            break;
+        }
+    }
+
     e->next = tc->fn_registry;
     tc->fn_registry = e;
 }
@@ -306,6 +324,11 @@ static TypeRef *check_call(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
         arg_types[i] = check_node(tc, node->call.args.items[i], env);
     }
 
+    if (strcmp(name, "set") == 0 && argc == 4) {
+        /* Double-indexed set: set m i j v → set(get(m, i), j, v) */
+        return make_type(tc->arena, TYPE_VOID);
+    }
+
     if (strcmp(name, "set") == 0 && argc == 3) {
         /* Check if first arg is UDT for field set */
         if (arg_types[0] && arg_types[0]->kind == TYPE_NAMED) {
@@ -335,6 +358,18 @@ static TypeRef *check_call(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
                 map_type->val_type = arg_types[2];
         }
         return make_type(tc->arena, TYPE_VOID);
+    }
+
+    if (strcmp(name, "get") == 0 && argc == 3) {
+        /* Double-indexed get: get m i j → get(get(m, i), j)
+         * For a map-of-maps, the inner get returns a map, outer returns val type.
+         * With bare map (no subtypes), return TYPE_UNKNOWN to avoid false errors. */
+        TypeRef *map_type = get_map_type(tc, node->call.args.items[0], env);
+        if (map_type && map_type->val_type && map_type->val_type->kind == TYPE_MAP
+            && map_type->val_type->val_type)
+            return map_type->val_type->val_type;
+        /* For bare map<int, map> or untyped map, assume int (common for matrices) */
+        return make_type(tc->arena, TYPE_INT);
     }
 
     if (strcmp(name, "get") == 0 && argc == 2) {
@@ -376,6 +411,58 @@ static TypeRef *check_call(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
 
     if (strcmp(name, "mapcount") == 0 && argc == 1) {
         return make_type(tc->arena, TYPE_INT);
+    }
+
+    if (strcmp(name, "length") == 0 && argc == 1) {
+        return make_type(tc->arena, TYPE_INT);
+    }
+
+    if (strcmp(name, "to_int") == 0 && argc == 1) {
+        return make_type(tc->arena, TYPE_INT);
+    }
+
+    if (strcmp(name, "to_float") == 0 && argc == 1) {
+        return make_type(tc->arena, TYPE_FLOAT);
+    }
+
+    if (strcmp(name, "to_string") == 0 && argc == 1) {
+        TypeRef *t = make_type(tc->arena, TYPE_MAP);
+        t->key_type = make_type(tc->arena, TYPE_INT);
+        t->val_type = make_type(tc->arena, TYPE_CHAR);
+        return t;
+    }
+
+    if (strcmp(name, "concat") == 0 && argc == 2) {
+        TypeRef *t = make_type(tc->arena, TYPE_MAP);
+        t->key_type = make_type(tc->arena, TYPE_INT);
+        t->val_type = make_type(tc->arena, TYPE_CHAR);
+        return t;
+    }
+
+    if (strcmp(name, "clone") == 0 && argc == 1) {
+        return arg_types[0] ? arg_types[0] : make_type(tc->arena, TYPE_MAP);
+    }
+
+    if (strcmp(name, "keys") == 0 && argc == 1) {
+        return make_type(tc->arena, TYPE_MAP);
+    }
+
+    if (strcmp(name, "values") == 0 && argc == 1) {
+        return make_type(tc->arena, TYPE_MAP);
+    }
+
+    if (strcmp(name, "append") == 0 && argc == 2) {
+        return make_type(tc->arena, TYPE_VOID);
+    }
+
+    if (strcmp(name, "invoke") == 0 && argc >= 1) {
+        if (arg_types[0] && arg_types[0]->kind == TYPE_FN && arg_types[0]->fn_return_type)
+            return arg_types[0]->fn_return_type;
+        return make_type(tc->arena, TYPE_UNKNOWN);
+    }
+
+    if (strcmp(name, "print") == 0 && argc == 1) {
+        return make_type(tc->arena, TYPE_VOID);
     }
 
     /* Look up fn in registry */
@@ -594,8 +681,11 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
             return make_type(tc->arena, TYPE_VOID);
 
         case NODE_PRECEDENCE:
+        case NODE_ALIAS:
         case NODE_PARAM:
         case NODE_TYPE_REF:
+        case NODE_BREAK:
+        case NODE_CONTINUE:
             return make_type(tc->arena, TYPE_VOID);
 
         case NODE_PROGRAM:

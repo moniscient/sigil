@@ -94,7 +94,7 @@ run_test "int_lit" \
     "42"
 
 run_test "negative_int" \
-    "print begin negate 7 end" \
+    "print do negate 7 end" \
     "-7"
 
 run_test "bool_true" \
@@ -110,31 +110,31 @@ print x" \
 echo "--- Arithmetic ---"
 
 run_test "add" \
-    "print begin add 3 4 end" \
+    "print do add 3 4 end" \
     "7"
 
 run_test "subtract" \
-    "print begin subtract 10 3 end" \
+    "print do subtract 10 3 end" \
     "7"
 
 run_test "multiply" \
-    "print begin multiply 6 7 end" \
+    "print do multiply 6 7 end" \
     "42"
 
 run_test "divide" \
-    "print begin divide 100 4 end" \
+    "print do divide 100 4 end" \
     "25"
 
 run_test "modulo" \
-    "print begin modulo 17 5 end" \
+    "print do modulo 17 5 end" \
     "2"
 
 run_test "nested_arithmetic" \
-    "print begin add begin multiply 3 4 end begin subtract 10 2 end end" \
+    "print do add do multiply 3 4 end do subtract 10 2 end end" \
     "20"
 
 run_test "deeply_nested" \
-    "print begin add begin add 1 2 end begin add 3 4 end end" \
+    "print do add do add 1 2 end do add 3 4 end end" \
     "10"
 
 echo "--- Let / Var / Assign ---"
@@ -152,9 +152,9 @@ print x" \
 
 run_test "var_accumulate" \
     "var total 0
-assign total begin add total 10 end
-assign total begin add total 20 end
-assign total begin add total 30 end
+assign total do add total 10 end
+assign total do add total 20 end
+assign total do add total 30 end
 print total" \
     "60"
 
@@ -210,8 +210,8 @@ run_test "while_sum" \
     "var sum 0
 var i 1
 while less i 6 begin
-  assign sum begin add sum i end
-  assign i begin add i 1 end
+  assign sum do add sum i end
+  assign i do add i 1 end
 end
 print sum" \
     "15"
@@ -220,8 +220,8 @@ run_test "while_countdown" \
     "var n 5
 var result 1
 while greater n 0 begin
-  assign result begin multiply result n end
-  assign n begin subtract n 1 end
+  assign result do multiply result n end
+  assign n do subtract n 1 end
 end
 print result" \
     "120"
@@ -257,34 +257,34 @@ echo "--- Functions ---"
 
 run_test "fn_simple" \
     "fn double int a returns int
-  begin return begin add a a end end
-print begin double 21 end" \
+  begin return do add a a end end
+print do double 21 end" \
     "42"
 
 run_test "fn_two_params" \
     "fn sum3 int a int b int c returns int
-  begin return begin add a begin add b c end end end
-print begin sum3 10 20 30 end" \
+  begin return do add a do add b c end end end
+print do sum3 10 20 30 end" \
     "60"
 
 run_test "fn_calling_fn" \
     "fn double int a returns int
-  begin return begin add a a end end
+  begin return do add a a end end
 fn quadruple int a returns int
-  begin return begin double begin double a end end end
-print begin quadruple 5 end" \
+  begin return do double do double a end end end
+print do quadruple 5 end" \
     "20"
 
 run_test "fn_with_if" \
     "fn abs int x returns int
   begin
     if less x 0 begin
-      return begin negate x end
+      return do negate x end
     end else begin
       return x
     end
   end
-print begin abs begin negate 42 end end" \
+print do abs do negate 42 end end" \
     "42"
 
 run_test "fn_recursive_factorial" \
@@ -293,10 +293,10 @@ run_test "fn_recursive_factorial" \
     if equal n 0 begin
       return 1
     end else begin
-      return begin multiply n begin factorial begin subtract n 1 end end end
+      return do multiply n do factorial do subtract n 1 end end end
     end
   end
-print begin factorial 6 end" \
+print do factorial 6 end" \
     "720"
 
 run_test "fn_fibonacci" \
@@ -305,17 +305,17 @@ run_test "fn_fibonacci" \
     if less n 2 begin
       return n
     end else begin
-      return begin add begin fib begin subtract n 1 end end begin fib begin subtract n 2 end end end
+      return do add do fib do subtract n 1 end end do fib do subtract n 2 end end end
     end
   end
-print begin fib 10 end" \
+print do fib 10 end" \
     "55"
 
 echo "--- Var params ---"
 
 run_test "var_param_inc" \
     "fn inc var int x returns void
-  begin assign x begin add x 1 end end
+  begin assign x do add x 1 end end
 var n 5
 inc n
 print n" \
@@ -323,7 +323,7 @@ print n" \
 
 run_test "var_param_double" \
     "fn double_it var int x returns void
-  begin assign x begin multiply x 2 end end
+  begin assign x do multiply x 2 end end
 var val 7
 double_it val
 print val" \
@@ -332,25 +332,25 @@ print val" \
 echo "--- Sigil algebra (full pipeline) ---"
 
 run_test "sigil_add_skw" \
-    "let x begin add 3 4 end
+    "let x do add 3 4 end
 print x" \
     "7"
 
 run_test "sigil_precedence_skw" \
-    "let x begin add 2 begin multiply 3 4 end end
+    "let x do add 2 do multiply 3 4 end end
 print x" \
     "14"
 
 run_test "sigil_negate_skw" \
-    "let x begin negate 5 end
-let y begin add x 10 end
+    "let x do negate 5 end
+let y do add x 10 end
 print y" \
     "5"
 
 run_test "sigil_multi_ops_skw" \
-    "let x begin subtract 10 3 end
-let y begin multiply x 2 end
-let z begin add y 1 end
+    "let x do subtract 10 3 end
+let y do multiply x 2 end
+let z do add y 1 end
 print z" \
     "15"
 
@@ -403,22 +403,22 @@ run_test "euclid_gcd" \
     if equal b 0 begin
       return a
     end else begin
-      return begin gcd b begin modulo a b end end
+      return do gcd b do modulo a b end end
     end
   end
-print begin gcd 48 18 end" \
+print do gcd 48 18 end" \
     "6"
 
 run_test "is_even_odd" \
     "fn iseven int n returns bool
-  begin return begin equal begin modulo n 2 end 0 end end
+  begin return do equal do modulo n 2 end 0 end end
 var count 0
 var i 0
 while less i 10 begin
   if iseven i begin
-    assign count begin add count 1 end
+    assign count do add count 1 end
   end
-  assign i begin add i 1 end
+  assign i do add i 1 end
 end
 print count" \
     "5"
@@ -429,10 +429,10 @@ run_test "power" \
     if equal exp 0 begin
       return 1
     end else begin
-      return begin multiply base begin power base begin subtract exp 1 end end end
+      return do multiply base do power base do subtract exp 1 end end end
     end
   end
-print begin power 2 10 end" \
+print do power 2 10 end" \
     "1024"
 
 run_test "nested_while" \
@@ -441,18 +441,18 @@ var i 0
 while less i 3 begin
   var j 0
   while less j 4 begin
-    assign total begin add total 1 end
-    assign j begin add j 1 end
+    assign total do add total 1 end
+    assign j do add j 1 end
   end
-  assign i begin add i 1 end
+  assign i do add i 1 end
 end
 print total" \
     "12"
 
 run_test "sequential_computation" \
     "var x 1
-assign x begin add x 1 end
-assign x begin add x 1 end
+assign x do add x 1 end
+assign x do add x 1 end
 print x" \
     "3"
 
@@ -461,7 +461,7 @@ echo "--- Map operations ---"
 run_test "map_set_get" \
     "var m mapnew
 set m 1 42
-let v begin get m 1 end
+let v do get m 1 end
 print v" \
     "42"
 
@@ -470,7 +470,7 @@ run_test "map_set_multiple" \
 set m 1 10
 set m 2 20
 set m 3 30
-print begin get m 2 end" \
+print do get m 2 end" \
     "20"
 
 run_test "map_has_true" \
@@ -498,14 +498,14 @@ set m 1 10
 set m 2 20
 set m 3 30
 remove m 2
-print begin mapcount m end" \
+print do mapcount m end" \
     "2"
 
 run_test "map_float_values" \
     "var m mapnew
 set m 1 3.14
 set m 2 2.71
-print begin get m 1 end" \
+print do get m 1 end" \
     "3.14"
 
 run_test "map_bool_values" \
@@ -521,17 +521,17 @@ end" \
 
 run_test "map_in_fn" \
     "fn lookup map int int m int key returns int
-  begin return begin get m key end end
+  begin return do get m key end end
 var m mapnew
 set m 10 42
-print begin lookup m 10 end" \
+print do lookup m 10 end" \
     "42"
 
 run_test "map_overwrite" \
     "var m mapnew
 set m 1 10
 set m 1 99
-print begin get m 1 end" \
+print do get m 1 end" \
     "99"
 
 echo "--- User-defined types ---"
@@ -539,28 +539,28 @@ echo "--- User-defined types ---"
 run_test "udt_construct_get" \
     "type Point int x int y
 let p Point 3 4
-print begin get p x end" \
+print do get p x end" \
     "3"
 
 run_test "udt_get_second_field" \
     "type Point int x int y
 let p Point 10 20
-print begin get p y end" \
+print do get p y end" \
     "20"
 
 run_test "udt_set_field" \
     "type Point int x int y
 var p Point 1 2
 set p x 99
-print begin get p x end" \
+print do get p x end" \
     "99"
 
 run_test "udt_pass_to_fn" \
     "type Point int x int y
 fn getx Point p returns int
-  begin return begin get p x end end
+  begin return do get p x end end
 let p Point 7 8
-print begin getx p end" \
+print do getx p end" \
     "7"
 
 run_test "udt_nested" \
@@ -569,14 +569,14 @@ type Line Point a Point b
 let p1 Point 0 0
 let p2 Point 3 4
 let seg Line p1 p2
-print begin get begin get seg b end x end" \
+print do get do get seg b end x end" \
     "3"
 
 run_test "udt_multiple_prints" \
     "type Point int x int y
 let p Point 5 10
-print begin get p x end
-print begin get p y end" \
+print do get p x end
+print do get p y end" \
     "5
 10"
 
@@ -585,7 +585,7 @@ echo "--- For loop / Range ---"
 run_test "for_range_sum" \
     "var sum 0
 for i in range 1 6 begin
-  assign sum begin add sum i end
+  assign sum do add sum i end
 end
 print sum" \
     "15"
@@ -603,20 +603,20 @@ echo "--- Monomorphization ---"
 run_test "mono_identity_int" \
     "fn identity T x returns T
   begin return x end
-print begin identity 42 end" \
+print do identity 42 end" \
     "42"
 
 run_test "mono_identity_float" \
     "fn identity T x returns T
   begin return x end
-print begin identity 3.14 end" \
+print do identity 3.14 end" \
     "3.14"
 
 run_test "mono_identity_both" \
     "fn identity T x returns T
   begin return x end
-print begin identity 42 end
-print begin identity 3.14 end" \
+print do identity 42 end
+print do identity 3.14 end" \
     "42
 3.14"
 
@@ -624,9 +624,9 @@ run_test "mono_transitive" \
     "fn identity T x returns T
   begin return x end
 fn wrap T x returns T
-  begin return begin identity x end end
-print begin wrap 42 end
-print begin wrap 3.14 end" \
+  begin return do identity x end end
+print do wrap 42 end
+print do wrap 3.14 end" \
     "42
 3.14"
 
@@ -785,6 +785,182 @@ set m 2 20
 set m 3 30
 let n length m
 print n" "3"
+
+echo "--- Break / Continue ---"
+
+run_test "break_in_while" \
+    "var sum 0
+var i 0
+while less i 100 begin
+  if equal i 5 begin
+    break
+  end
+  assign sum do add sum i end
+  assign i do add i 1 end
+end
+print sum" \
+    "10"
+
+run_test "continue_in_while" \
+    "var sum 0
+var i 0
+while less i 6 begin
+  assign i do add i 1 end
+  let r modulo i 2
+  if equal r 0 begin
+    continue
+  end
+  assign sum do add sum i end
+end
+print sum" \
+    "9"
+
+echo "--- Invoke (closure calls) ---"
+
+run_test "invoke_lambda" \
+    "let f lambda int x returns int begin return do add x 10 end end
+print do invoke f 5 end" \
+    "15"
+
+run_test "invoke_lambda_capture" \
+    "let offset 100
+let f lambda int x returns int begin return do add x offset end end
+print do invoke f 42 end" \
+    "142"
+
+echo "--- String concat ---"
+
+run_test "concat_strings" 'let a "hello "
+let b "world"
+let c concat a b
+print c' "hello world"
+
+echo "--- Map operations (extended) ---"
+
+run_test "append_to_map" \
+    "var m mapnew
+append m 10
+append m 20
+append m 30
+print do get m 0 end
+print do get m 1 end
+print do get m 2 end" \
+    "10
+20
+30"
+
+run_test "clone_map" \
+    "var m mapnew
+set m 1 42
+var m2 clone m
+set m2 1 99
+print do get m 1 end
+print do get m2 1 end" \
+    "42
+99"
+
+run_test "keys_map" \
+    "var m mapnew
+set m 10 1
+set m 20 2
+let k keys m
+print do mapcount k end" \
+    "2"
+
+run_test "values_map" \
+    "var m mapnew
+set m 1 10
+set m 2 20
+let v values m
+print do mapcount v end" \
+    "2"
+
+echo "--- Type conversions ---"
+
+run_test "to_int_from_float" \
+    "let x to_int 3.7
+print x" \
+    "3"
+
+run_test "to_float_from_int" \
+    "let x to_float 42
+print x" \
+    "42"
+
+run_test "to_string_from_int" 'let s to_string 42
+print s' "42"
+
+run_test "to_string_from_bool" 'let s to_string true
+print s' "true"
+
+echo "--- Break in for loop ---"
+
+run_test "break_in_for" \
+    "var sum 0
+for i in range 0 100 begin
+  if equal i 5 begin
+    break
+  end
+  assign sum do add sum i end
+end
+print sum" \
+    "10"
+
+echo "--- Print map ---"
+
+run_test "print_map" \
+    "var m mapnew
+set m 1 42
+print m" \
+    "{1: 42}"
+
+echo "--- Alias system ---"
+
+run_sigil_test "alias_sigil_to_structural" \
+    "algebra A
+fn add int a + int b returns int
+alias ( do
+alias ) end
+precedence +
+use A
+  let x 3 + 4
+  print ( add x 10 )" \
+    "17"
+
+run_sigil_test "alias_keyword_to_keyword" \
+    "algebra A
+fn add int a + int b returns int
+alias mul multiply
+precedence +
+use A
+  let x mul 3 4
+  print x" \
+    "12"
+
+run_sigil_test "alias_braces" \
+    "algebra A
+fn add int a + int b returns int
+alias { begin
+alias } end
+precedence +
+use A
+  if true {
+    print 42
+  }" \
+    "42"
+
+run_sigil_test "alias_structural_keywords" \
+    "algebra A
+fn add int a + int b returns int
+alias si if
+alias imprimer print
+alias vrai true
+precedence +
+use A
+  si vrai begin
+    imprimer 99
+  end" \
+    "99"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

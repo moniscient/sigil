@@ -201,6 +201,137 @@ void sigil_print_string(SigilMap *m) {
     printf("\n");
 }
 
+/* ── String Concat ───────────────────────────────────────────────── */
+
+SigilMap *sigil_string_concat(SigilMap *a, SigilMap *b) {
+    SigilMap *result = sigil_map_new();
+    int64_t idx = 0;
+    if (a) {
+        for (int64_t i = 0; i < (int64_t)a->count; i++) {
+            SigilVal v = sigil_map_get(a, sigil_val_int(i));
+            sigil_map_set(result, sigil_val_int(idx++), v);
+        }
+    }
+    if (b) {
+        for (int64_t i = 0; i < (int64_t)b->count; i++) {
+            SigilVal v = sigil_map_get(b, sigil_val_int(i));
+            sigil_map_set(result, sigil_val_int(idx++), v);
+        }
+    }
+    return result;
+}
+
+/* ── Map Copy ────────────────────────────────────────────────────── */
+
+SigilMap *sigil_map_copy(SigilMap *m) {
+    SigilMap *result = sigil_map_new();
+    if (!m) return result;
+    for (int i = 0; i < m->capacity; i++) {
+        if (m->buckets[i].occupied)
+            sigil_map_set(result, m->buckets[i].key, m->buckets[i].val);
+    }
+    return result;
+}
+
+/* ── Map Append ──────────────────────────────────────────────────── */
+
+void sigil_map_append(SigilMap *m, SigilVal val) {
+    int64_t idx = (int64_t)m->count;
+    sigil_map_set(m, sigil_val_int(idx), val);
+}
+
+/* ── Map Keys/Values ─────────────────────────────────────────────── */
+
+SigilMap *sigil_map_keys(SigilMap *m) {
+    SigilMap *result = sigil_map_new();
+    if (!m) return result;
+    int64_t idx = 0;
+    for (int i = 0; i < m->capacity; i++) {
+        if (m->buckets[i].occupied)
+            sigil_map_set(result, sigil_val_int(idx++), m->buckets[i].key);
+    }
+    return result;
+}
+
+SigilMap *sigil_map_values(SigilMap *m) {
+    SigilMap *result = sigil_map_new();
+    if (!m) return result;
+    int64_t idx = 0;
+    for (int i = 0; i < m->capacity; i++) {
+        if (m->buckets[i].occupied)
+            sigil_map_set(result, sigil_val_int(idx++), m->buckets[i].val);
+    }
+    return result;
+}
+
+/* ── Map Print ───────────────────────────────────────────────────── */
+
+void sigil_print_map(SigilMap *m) {
+    if (!m) { printf("{}\n"); return; }
+    printf("{");
+    bool first = true;
+    for (int i = 0; i < m->capacity; i++) {
+        if (!m->buckets[i].occupied) continue;
+        if (!first) printf(", ");
+        first = false;
+        SigilVal k = m->buckets[i].key;
+        SigilVal v = m->buckets[i].val;
+        /* Print key */
+        switch (k.kind) {
+            case SIGIL_VAL_INT:   printf("%lld", (long long)k.i); break;
+            case SIGIL_VAL_FLOAT: printf("%g", k.f); break;
+            case SIGIL_VAL_BOOL:  printf("%s", k.b ? "true" : "false"); break;
+            case SIGIL_VAL_CHAR:  printf("'%c'", (char)k.c); break;
+            default: printf("?"); break;
+        }
+        printf(": ");
+        /* Print value */
+        switch (v.kind) {
+            case SIGIL_VAL_INT:   printf("%lld", (long long)v.i); break;
+            case SIGIL_VAL_FLOAT: printf("%g", v.f); break;
+            case SIGIL_VAL_BOOL:  printf("%s", v.b ? "true" : "false"); break;
+            case SIGIL_VAL_CHAR:  printf("'%c'", (char)v.c); break;
+            case SIGIL_VAL_MAP:   printf("<map>"); break;
+            case SIGIL_VAL_CLOSURE: printf("<closure>"); break;
+        }
+    }
+    printf("}\n");
+}
+
+/* ── Type Conversions ────────────────────────────────────────────── */
+
+int64_t sigil_to_int(double v) { return (int64_t)v; }
+double sigil_to_float(int64_t v) { return (double)v; }
+
+SigilMap *sigil_int_to_string(int64_t v) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    return sigil_string_from_utf8(buf, len);
+}
+
+SigilMap *sigil_float_to_string(double v) {
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "%g", v);
+    return sigil_string_from_utf8(buf, len);
+}
+
+SigilMap *sigil_bool_to_string(bool v) {
+    const char *s = v ? "true" : "false";
+    return sigil_string_from_utf8(s, (int)strlen(s));
+}
+
+SigilMap *sigil_char_to_string(uint32_t v) {
+    char buf[5] = {0};
+    int len = 0;
+    if (v < 0x80) { buf[0] = (char)v; len = 1; }
+    else if (v < 0x800) { buf[0] = 0xC0 | (v >> 6); buf[1] = 0x80 | (v & 0x3F); len = 2; }
+    else if (v < 0x10000) { buf[0] = 0xE0 | (v >> 12); buf[1] = 0x80 | ((v >> 6) & 0x3F); buf[2] = 0x80 | (v & 0x3F); len = 3; }
+    else { buf[0] = 0xF0 | (v >> 18); buf[1] = 0x80 | ((v >> 12) & 0x3F); buf[2] = 0x80 | ((v >> 6) & 0x3F); buf[3] = 0x80 | (v & 0x3F); len = 4; }
+    return sigil_string_from_utf8(buf, len);
+}
+
+/* ── String from UTF-8 ───────────────────────────────────────────── */
+
 SigilMap *sigil_string_from_utf8(const char *s, int len) {
     SigilMap *m = sigil_map_new();
     int64_t idx = 0;
@@ -219,5 +350,23 @@ SigilMap *sigil_string_from_utf8(const char *s, int len) {
         idx++;
         pos += cplen;
     }
+    return m;
+}
+
+/* ── Row/Matrix Constructors ─────────────────────────────────────── */
+
+SigilMap *sigil_row(SigilVal first, int _repeats_count, SigilVal *_repeats_data) {
+    SigilMap *m = sigil_map_new();
+    sigil_map_set(m, sigil_val_int(0), first);
+    for (int i = 0; i < _repeats_count; i++)
+        sigil_map_set(m, sigil_val_int(i + 1), _repeats_data[i]);
+    return m;
+}
+
+SigilMap *sigil_matrix(SigilVal first, int _repeats_count, SigilVal *_repeats_data) {
+    SigilMap *m = sigil_map_new();
+    sigil_map_set(m, sigil_val_int(0), first);
+    for (int i = 0; i < _repeats_count; i++)
+        sigil_map_set(m, sigil_val_int(i + 1), _repeats_data[i]);
     return m;
 }

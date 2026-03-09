@@ -44,15 +44,15 @@ static void test_keyword_prefix_call(void) {
     ASSERT(call->call.args.count == 2, "two arguments");
 }
 
-static void test_begin_end_nesting(void) {
-    printf("--- Begin/end nesting ---\n");
-    ASTNode *prog = parse_source("add a begin times b c end");
+static void test_do_end_nesting(void) {
+    printf("--- Do/end nesting ---\n");
+    ASTNode *prog = parse_source("add a do times b c end");
     ASSERT(prog->kind == NODE_PROGRAM, "program node");
     ASTNode *call = prog->program.top_level.items[0];
     ASSERT(call->kind == NODE_CALL, "is a call");
     ASSERT(call->call.args.count == 2, "two args");
     ASTNode *inner = call->call.args.items[1];
-    ASSERT(inner->kind == NODE_BEGIN_END, "second arg is begin/end");
+    ASSERT(inner->kind == NODE_BEGIN_END, "second arg is do/end");
 }
 
 static void test_fn_declaration(void) {
@@ -157,7 +157,7 @@ int main(void) {
     printf("=== Parser Tests ===\n\n");
 
     test_keyword_prefix_call();
-    test_begin_end_nesting();
+    test_do_end_nesting();
     test_fn_declaration();
     test_fn_prefix_operator();
     test_fn_postfix_operator();

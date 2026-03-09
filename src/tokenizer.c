@@ -6,14 +6,14 @@
 /* ── Keyword Tables ──────────────────────────────────────────────── */
 
 static const char *structural_keywords[] = {
-    "fn", "returns", "return", "repeats", "begin", "end",
+    "fn", "returns", "return", "repeats", "begin", "end", "do",
     "if", "elif", "else", "while", "for", "in",
     "match", "case", "default",
     "let", "var", "assign",
     "precedence", "trait", "implement", "requires",
     "algebra", "library", "use", "type",
     "lambda", "collect", "apply", "from", "where",
-    "import",
+    "import", "break", "continue", "alias",
     NULL
 };
 
@@ -23,6 +23,8 @@ static const char *primitive_keywords[] = {
     "get", "set", "length", "range",
     "not", "and", "or", "print",
     "mapnew", "has", "remove", "mapcount",
+    "invoke", "concat", "append", "clone", "keys", "values",
+    "to_int", "to_float", "to_string",
     NULL
 };
 
@@ -410,6 +412,8 @@ if (strcmp(text, "begin") == 0)
             return make_token(TOK_BEGIN, text, loc);
         if (strcmp(text, "end") == 0)
             return make_token(TOK_END, text, loc);
+        if (strcmp(text, "do") == 0)
+            return make_token(TOK_DO, text, loc);
         if (strcmp(text, "true") == 0) {
             Token tok = make_token(TOK_KEYWORD, text, loc);
             return tok;

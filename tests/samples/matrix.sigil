@@ -4,32 +4,36 @@ rem Primitive sugar: bind sigils to built-in keywords
 fn add int a + int b returns int
 fn times int a * int b returns int
 fn subtract int a - int b returns int
-fn get mat m [ int i , int j ] returns int
-fn set mat m [ int i , int j ] = int v returns void
+fn get map m [ int i , int j ] returns int
+fn set map m [ int i , int j ] = int v returns void
 fn range int a .. int b returns iter
 
 rem Span: nullary sigil that expands to the full range of a dimension
-fn span * returns iter
-  return begin range 0 begin length context end end
+rem span requires context passing, disabled for now
+rem fn span * returns iter begin
+rem   return do range 0 do length context end end
+rem end
 
 rem Matrix literal sugar: row and matrix constructors via repeats
-fn row [ int a , repeats ] returns mat
-fn matrix [ mat a ; repeats ] returns mat
+fn row [ int a , repeats ] returns map
+fn matrix [ map a ; repeats ] returns map
 
 rem Dot product: sum of element-wise products across a shared dimension
-fn dot mat a int row mat b int col int n returns int
+fn dot map a int row map b int col int n returns int begin
   var acc 0
-  for k in begin range 0 n end begin
-    assign acc begin add acc begin times begin get a row k end begin get b k col end end end
+  for k in do range 0 n end begin
+    assign acc do add acc do times do get a row k end do get b k col end end end
   end
   return acc
+end
 
 rem Matrix multiply: comprehension over row/col pairs
-fn multiply mat a @ mat b returns mat
-  let rows begin length a end
-  let cols begin length b end
-  let n begin length a end
-  collect from i in range 0 rows apply collect from j in range 0 cols apply dot a i b j n
+fn multiply map a @ map b returns map begin
+  let rows do length a end
+  let cols do length do get b 0 end end
+  let n do length do get a 0 end end
+  return do collect from i in range 0 rows apply collect from j in range 0 cols apply dot a i b j n end
+end
 
 rem Precedence: low to high
 precedence + - * @ ..

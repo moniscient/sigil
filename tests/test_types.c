@@ -169,7 +169,7 @@ static void test_explicit_return(void) {
     error_list_init(&errors, &arena);
 
     /* fn with returns int and explicit return — should pass */
-    const char *good = "fn double int a returns int\n  begin return begin add a a end end";
+    const char *good = "fn double int a returns int\n  begin return do add a a end end";
     Tokenizer t;
     tokenizer_init(&t, good, "<test>", &it, &errors, NULL);
     TokenList tokens = tokenize_all(&t);
@@ -283,8 +283,8 @@ static void test_fn_return_type_inference(void) {
     /* Define a fn, call it, check that the return type propagates */
     const char *src =
         "fn double int a returns int\n"
-        "  begin return begin add a a end end\n"
-        "let x begin double 5 end\n";
+        "  begin return do add a a end end\n"
+        "let x do double 5 end\n";
     Tokenizer t;
     tokenizer_init(&t, src, "<test>", &it, &errors, NULL);
     TokenList tokens = tokenize_all(&t);

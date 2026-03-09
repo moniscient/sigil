@@ -174,6 +174,7 @@ static TypeRef *parse_type(Parser *p) {
 /* ── Forward Declarations ────────────────────────────────────────── */
 
 static ASTNode *parse_begin_end(Parser *p);
+static ASTNode *parse_do_end(Parser *p);
 static ASTNode *parse_keyword_call(Parser *p, const char *keyword, SrcLoc loc);
 static ASTNode *parse_lambda(Parser *p);
 static ASTNode *parse_collect(Parser *p);
@@ -227,8 +228,8 @@ static ASTNode *parse_atom(Parser *p) {
     if (t->kind == TOK_KEYWORD && strcmp(t->text, "collect") == 0) {
         return parse_collect(p);
     }
-    if (t->kind == TOK_BEGIN) {
-        return parse_begin_end(p);
+    if (t->kind == TOK_DO) {
+        return parse_do_end(p);
     }
     if (t->kind == TOK_IDENT) {
         ASTNode *n = ast_new(p->arena, NODE_IDENT, t->loc);
@@ -255,7 +256,7 @@ ASTNode *parse_expression(Parser *p) {
     return parse_atom(p);
 }
 
-/* ── Begin/End Block ─────────────────────────────────────────────── */
+/* ── Begin/End Block (body delimiter) ────────────────────────────── */
 
 static ASTNode *parse_begin_end(Parser *p) {
     SrcLoc loc = cur(p)->loc;
@@ -273,11 +274,29 @@ static ASTNode *parse_begin_end(Parser *p) {
     return n;
 }
 
+/* ── Do/End Expression Group ─────────────────────────────────────── */
+
+static ASTNode *parse_do_end(Parser *p) {
+    SrcLoc loc = cur(p)->loc;
+    expect(p, TOK_DO, "do");
+    ASTNode *n = ast_new(p->arena, NODE_BEGIN_END, loc);
+    da_init(&n->block.stmts);
+
+    while (!at_eof(p) && !at(p, TOK_END)) {
+        skip_newlines(p);
+        if (at(p, TOK_END)) break;
+        ASTNode *stmt = parse_statement(p);
+        if (stmt) da_push(&n->block.stmts, stmt);
+    }
+    expect(p, TOK_END, "end");
+    return n;
+}
+
 /* ── Keyword-Prefix Call Parsing ─────────────────────────────────── */
 
-/* Parse a single argument in keyword-prefix context: either begin/end block or atom */
+/* Parse a single argument in keyword-prefix context: either do/end group or atom */
 static ASTNode *parse_kw_arg(Parser *p) {
-    if (at(p, TOK_BEGIN)) return parse_begin_end(p);
+    if (at(p, TOK_DO)) return parse_do_end(p);
     return parse_atom(p);
 }
 
@@ -287,8 +306,8 @@ static ASTNode *parse_keyword_call(Parser *p, const char *keyword, SrcLoc loc) {
     n->call.call_name = keyword;
     da_init(&n->call.args);
 
-    /* Collect args until we hit: keyword, end, EOF, newline, or another statement boundary */
-    while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+    /* Collect args until we hit: keyword, end, begin, EOF, newline, or another statement boundary */
+    while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_BEGIN) && !at(p, TOK_NEWLINE) &&
            !(cur(p)->kind == TOK_KEYWORD && (is_structural_keyword(cur(p)->text) ||
                                               is_primitive_keyword(cur(p)->text)))) {
         ASTNode *arg = parse_kw_arg(p);
@@ -625,7 +644,8 @@ static bool is_decl_node(NodeKind kind) {
     return kind == NODE_FN_DECL || kind == NODE_TRAIT_DECL ||
            kind == NODE_IMPLEMENT || kind == NODE_ALGEBRA ||
            kind == NODE_LIBRARY || kind == NODE_PRECEDENCE ||
-           kind == NODE_TYPE_DECL || kind == NODE_IMPORT;
+           kind == NODE_TYPE_DECL || kind == NODE_IMPORT ||
+           kind == NODE_ALIAS;
 }
 
 static ASTNode *parse_import(Parser *p) {
@@ -742,6 +762,30 @@ static ASTNode *parse_precedence(Parser *p) {
         da_push(&n->precedence.sigils, cur(p)->text);
         eat(p);
     }
+    return n;
+}
+
+static ASTNode *parse_alias(Parser *p) {
+    SrcLoc loc = cur(p)->loc;
+    expect_text(p, "alias");
+
+    ASTNode *n = ast_new(p->arena, NODE_ALIAS, loc);
+
+    /* alias FROM TO — both can be sigils, keywords, or identifiers */
+    if (at_eof(p) || at(p, TOK_NEWLINE)) {
+        error_add(p->errors, ERR_PARSER, loc, "expected source token after 'alias'");
+        return n;
+    }
+    n->alias.alias_from = cur(p)->text;
+    eat(p);
+
+    if (at_eof(p) || at(p, TOK_NEWLINE)) {
+        error_add(p->errors, ERR_PARSER, loc, "expected target token after alias source");
+        return n;
+    }
+    n->alias.alias_to = cur(p)->text;
+    eat(p);
+
     return n;
 }
 
@@ -975,12 +1019,15 @@ static ASTNode *parse_collect(Parser *p) {
 
 /* ── Control Flow ────────────────────────────────────────────────── */
 
-/* Parse a keyword-prefix call that stops at begin (for conditions/iterables) */
+/* Parse a keyword-prefix call that stops at begin (for conditions/iterables).
+   With do/end for expression grouping and begin/end for blocks, any begin
+   token is unambiguously a block delimiter — no lookahead needed. */
 static ASTNode *parse_condition_call(Parser *p, const char *keyword, SrcLoc loc) {
     ASTNode *n = ast_new(p->arena, NODE_CALL, loc);
     n->call.call_name = keyword;
     da_init(&n->call.args);
-    while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_BEGIN) && !at(p, TOK_NEWLINE) &&
+    while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+           !at(p, TOK_BEGIN) &&
            !(cur(p)->kind == TOK_KEYWORD && (is_structural_keyword(cur(p)->text) ||
                                               is_primitive_keyword(cur(p)->text)))) {
         ASTNode *arg = parse_kw_arg(p);
@@ -1013,7 +1060,8 @@ static ASTNode *parse_condition(Parser *p) {
         n->ident.ident = name;
         return n;
     }
-    /* begin/end or literal */
+    /* do/end expression group or literal */
+    if (t->kind == TOK_DO) return parse_do_end(p);
     return parse_expression(p);
 }
 
@@ -1106,8 +1154,8 @@ static ASTNode *parse_let_or_var(Parser *p, bool is_var) {
     n->binding.bind_name = cur(p)->text;
     expect(p, TOK_IDENT, "variable name");
 
-    if (at(p, TOK_BEGIN))
-        n->binding.value = parse_begin_end(p);
+    if (at(p, TOK_DO))
+        n->binding.value = parse_do_end(p);
     else if (cur(p)->kind == TOK_KEYWORD && strcmp(cur(p)->text, "lambda") == 0)
         n->binding.value = parse_lambda(p);
     else if (cur(p)->kind == TOK_KEYWORD && strcmp(cur(p)->text, "collect") == 0)
@@ -1139,8 +1187,8 @@ static ASTNode *parse_assign(Parser *p) {
     n->assign.assign_name = cur(p)->text;
     expect(p, TOK_IDENT, "variable name");
 
-    if (at(p, TOK_BEGIN))
-        n->assign.value = parse_begin_end(p);
+    if (at(p, TOK_DO))
+        n->assign.value = parse_do_end(p);
     else if (cur(p)->kind == TOK_KEYWORD && is_primitive_keyword(cur(p)->text)) {
         const char *kw = cur(p)->text;
         SrcLoc kloc = cur(p)->loc;
@@ -1155,8 +1203,8 @@ static ASTNode *parse_return(Parser *p) {
     SrcLoc loc = cur(p)->loc;
     eat(p); /* return */
     ASTNode *n = ast_new(p->arena, NODE_RETURN, loc);
-    if (at(p, TOK_BEGIN))
-        n->ret.value = parse_begin_end(p);
+    if (at(p, TOK_DO))
+        n->ret.value = parse_do_end(p);
     else if (cur(p)->kind == TOK_KEYWORD && is_primitive_keyword(cur(p)->text)) {
         const char *kw = cur(p)->text;
         SrcLoc kloc = cur(p)->loc;
@@ -1186,6 +1234,7 @@ ASTNode *parse_statement(Parser *p) {
         if (strcmp(t->text, "use") == 0) return parse_use(p);
         if (strcmp(t->text, "import") == 0) return parse_import(p);
         if (strcmp(t->text, "precedence") == 0) return parse_precedence(p);
+        if (strcmp(t->text, "alias") == 0) return parse_alias(p);
         if (strcmp(t->text, "type") == 0) return parse_type_decl(p);
         if (strcmp(t->text, "if") == 0) return parse_if(p);
         if (strcmp(t->text, "while") == 0) return parse_while(p);
@@ -1198,6 +1247,17 @@ ASTNode *parse_statement(Parser *p) {
 
         if (strcmp(t->text, "lambda") == 0) return parse_lambda(p);
         if (strcmp(t->text, "collect") == 0) return parse_collect(p);
+
+        if (strcmp(t->text, "break") == 0) {
+            SrcLoc loc = t->loc;
+            eat(p);
+            return ast_new(p->arena, NODE_BREAK, loc);
+        }
+        if (strcmp(t->text, "continue") == 0) {
+            SrcLoc loc = t->loc;
+            eat(p);
+            return ast_new(p->arena, NODE_CONTINUE, loc);
+        }
 
         /* Primitive keyword call: add, times, get, set, etc. */
         if (is_primitive_keyword(t->text)) {
@@ -1236,7 +1296,7 @@ ASTNode *parse_statement(Parser *p) {
         eat(p);
 
         /* Check if followed by arguments on the same line */
-        if (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+        if (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_BEGIN) && !at(p, TOK_NEWLINE) &&
             !(cur(p)->kind == TOK_KEYWORD && (is_structural_keyword(cur(p)->text) ||
                                                is_primitive_keyword(cur(p)->text)))) {
             return parse_keyword_call(p, name, loc);
@@ -1256,6 +1316,11 @@ ASTNode *parse_statement(Parser *p) {
     /* begin/end block */
     if (t->kind == TOK_BEGIN) {
         return parse_begin_end(p);
+    }
+
+    /* do/end expression group */
+    if (t->kind == TOK_DO) {
+        return parse_do_end(p);
     }
 
     /* Other: expression */

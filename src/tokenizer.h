@@ -12,8 +12,9 @@ typedef enum {
     TOK_INT_LIT,      /* integer literal */
     TOK_FLOAT_LIT,    /* floating point literal */
     TOK_STRING_LIT,   /* string literal (text...end) */
-    TOK_BEGIN,         /* begin */
-    TOK_END,           /* end */
+    TOK_BEGIN,         /* begin (block delimiter) */
+    TOK_END,           /* end (closes begin or do) */
+    TOK_DO,            /* do (expression grouping) */
     TOK_NEWLINE,       /* statement boundary */
     TOK_EOF
 } TokenKind;

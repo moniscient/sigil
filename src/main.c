@@ -84,6 +84,11 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    /* Phase 1.5: Apply alias rewriting (before parsing) */
+    if (!is_skw) {
+        alias_rewrite_tokens(&tokens, &intern_tab);
+    }
+
     /* Phase 2: Parse */
     ImportSet imports;
     import_set_init(&imports);

@@ -15,12 +15,15 @@ typedef enum {
     NODE_USE,
     NODE_PRECEDENCE,
     NODE_TYPE_DECL,
+    NODE_ALIAS,
 
     /* Statements */
     NODE_LET,
     NODE_VAR,
     NODE_ASSIGN,
     NODE_RETURN,
+    NODE_BREAK,
+    NODE_CONTINUE,
 
     /* Control flow */
     NODE_IF,
@@ -305,6 +308,12 @@ struct ASTNode {
             TypeRef **field_types;
             const char **field_names;
         } type_decl;
+
+        /* NODE_ALIAS */
+        struct {
+            const char *alias_from;
+            const char *alias_to;
+        } alias;
 
         /* NODE_PROGRAM */
         struct {

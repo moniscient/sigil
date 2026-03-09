@@ -182,7 +182,20 @@ static bool is_map_op(const char *name) {
     return strcmp(name, "mapnew") == 0 || strcmp(name, "get") == 0 ||
            strcmp(name, "set") == 0 || strcmp(name, "has") == 0 ||
            strcmp(name, "remove") == 0 || strcmp(name, "mapcount") == 0 ||
-           strcmp(name, "length") == 0;
+           strcmp(name, "length") == 0 || strcmp(name, "append") == 0 ||
+           strcmp(name, "clone") == 0 || strcmp(name, "keys") == 0 ||
+           strcmp(name, "values") == 0 || strcmp(name, "concat") == 0;
+}
+
+/* ── New builtin operations ──────────────────────────────────────── */
+
+static bool is_type_conversion(const char *name) {
+    return strcmp(name, "to_int") == 0 || strcmp(name, "to_float") == 0 ||
+           strcmp(name, "to_string") == 0;
+}
+
+static bool is_invoke_call(const char *name) {
+    return strcmp(name, "invoke") == 0;
 }
 
 /* ── UDT helpers ─────────────────────────────────────────────────── */
@@ -194,11 +207,33 @@ static TypeDef *find_type_def(CEmitter *e, const char *name) {
 /* ── Forward declarations ────────────────────────────────────────── */
 
 static void emit_expr(CEmitter *e, ASTNode *node);
+static void emit_boxed(CEmitter *e, ASTNode *arg);
 static void emit_stmt(CEmitter *e, ASTNode *node);
 static void emit_body(CEmitter *e, ASTNode *node);
 static TypeRef *infer_expr_type(CEmitter *e, ASTNode *node);
 static bool fn_entry_is_generic(FnEntry *fn);
 static void extract_type_vars(ASTNode *fn, const char **names, int *count);
+
+/* Emit a `get` result as raw SigilVal (no unboxing). Handles begin/end wrapping. */
+static void emit_raw_map_get(CEmitter *e, ASTNode *node) {
+    if (!node) return;
+    /* Unwrap begin/end to find the inner get call */
+    if (node->kind == NODE_BEGIN_END && node->block.stmts.count == 1)
+        node = node->block.stmts.items[0];
+    if (node->kind == NODE_CALL && strcmp(node->call.call_name, "get") == 0
+        && node->call.args.count == 2) {
+        fprintf(e->out, "sigil_map_get(");
+        emit_expr(e, node->call.args.items[0]);
+        fprintf(e->out, ", ");
+        emit_boxed(e, node->call.args.items[1]);
+        fprintf(e->out, ")");
+    } else {
+        /* Fallback: emit normally and box as SigilVal */
+        fprintf(e->out, "sigil_val_map(");
+        emit_expr(e, node);
+        fprintf(e->out, ")");
+    }
+}
 
 /* ── Type inference for expressions (uses TypeChecker env) ───────── */
 
@@ -254,6 +289,28 @@ static TypeRef *infer_expr_type(CEmitter *e, ASTNode *node) {
             strcmp(cn, "not") == 0 || strcmp(cn, "and") == 0 || strcmp(cn, "or") == 0)
             return make_type(e->arena, TYPE_BOOL);
         if (strcmp(cn, "mapcount") == 0 || strcmp(cn, "length") == 0) return make_type(e->arena, TYPE_INT);
+        if (strcmp(cn, "to_int") == 0) return make_type(e->arena, TYPE_INT);
+        if (strcmp(cn, "to_float") == 0) return make_type(e->arena, TYPE_FLOAT);
+        if (strcmp(cn, "to_string") == 0) {
+            TypeRef *t = make_type(e->arena, TYPE_MAP);
+            t->key_type = make_type(e->arena, TYPE_INT);
+            t->val_type = make_type(e->arena, TYPE_CHAR);
+            return t;
+        }
+        if (strcmp(cn, "concat") == 0) {
+            TypeRef *t = make_type(e->arena, TYPE_MAP);
+            t->key_type = make_type(e->arena, TYPE_INT);
+            t->val_type = make_type(e->arena, TYPE_CHAR);
+            return t;
+        }
+        if (strcmp(cn, "clone") == 0 || strcmp(cn, "keys") == 0 || strcmp(cn, "values") == 0)
+            return make_type(e->arena, TYPE_MAP);
+        if (strcmp(cn, "invoke") == 0 && node->call.args.count >= 1) {
+            TypeRef *fn_type = infer_expr_type(e, node->call.args.items[0]);
+            if (fn_type && fn_type->kind == TYPE_FN && fn_type->fn_return_type)
+                return fn_type->fn_return_type;
+            return make_type(e->arena, TYPE_INT);
+        }
         if (strcmp(cn, "get") == 0 && node->call.args.count == 2) {
             TypeRef *map_t = infer_expr_type(e, node->call.args.items[0]);
             if (map_t && map_t->kind == TYPE_MAP && map_t->val_type)
@@ -572,11 +629,103 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                 }
             }
 
+            /* Invoke: call a closure */
+            if (is_invoke_call(node->call.call_name) && node->call.args.count >= 1) {
+                ASTNode *closure_arg = node->call.args.items[0];
+                TypeRef *fn_type = infer_expr_type(e, closure_arg);
+                /* Cast fn_ptr and call: ((ret_type (*)(SigilClosure*, params...))(cl->fn_ptr))(cl, args...) */
+                fprintf(e->out, "({ SigilClosure *_inv_cl = ");
+                emit_expr(e, closure_arg);
+                fprintf(e->out, "; ((");
+                /* Return type */
+                TypeRef *ret_type = (fn_type && fn_type->kind == TYPE_FN && fn_type->fn_return_type)
+                    ? fn_type->fn_return_type : make_type(e->arena, TYPE_INT);
+                emit_c_type(e, ret_type);
+                fprintf(e->out, " (*)(SigilClosure*");
+                /* Param types */
+                int invoke_argc = node->call.args.count - 1;
+                for (int i = 0; i < invoke_argc; i++) {
+                    fprintf(e->out, ", ");
+                    if (fn_type && fn_type->kind == TYPE_FN && i < fn_type->fn_param_count)
+                        emit_c_type(e, fn_type->fn_param_types[i]);
+                    else {
+                        TypeRef *at = infer_expr_type(e, node->call.args.items[i + 1]);
+                        emit_c_type(e, at);
+                    }
+                }
+                fprintf(e->out, "))(_inv_cl->fn_ptr))(_inv_cl");
+                for (int i = 1; i < node->call.args.count; i++) {
+                    fprintf(e->out, ", ");
+                    emit_expr(e, node->call.args.items[i]);
+                }
+                fprintf(e->out, "); })");
+                break;
+            }
+
+            /* Type conversions */
+            if (is_type_conversion(node->call.call_name) && node->call.args.count == 1) {
+                const char *cn = node->call.call_name;
+                ASTNode *arg = node->call.args.items[0];
+                TypeRef *arg_type = infer_expr_type(e, arg);
+                if (strcmp(cn, "to_int") == 0) {
+                    if (arg_type && (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32 || arg_type->kind == TYPE_FLOAT64)) {
+                        fprintf(e->out, "sigil_to_int(");
+                        emit_expr(e, arg);
+                        fprintf(e->out, ")");
+                    } else if (arg_type && arg_type->kind == TYPE_CHAR) {
+                        fprintf(e->out, "(int64_t)(");
+                        emit_expr(e, arg);
+                        fprintf(e->out, ")");
+                    } else if (arg_type && arg_type->kind == TYPE_BOOL) {
+                        fprintf(e->out, "(int64_t)(");
+                        emit_expr(e, arg);
+                        fprintf(e->out, ")");
+                    } else {
+                        /* Already int */
+                        emit_expr(e, arg);
+                    }
+                } else if (strcmp(cn, "to_float") == 0) {
+                    if (arg_type && arg_type->kind == TYPE_INT) {
+                        fprintf(e->out, "sigil_to_float(");
+                        emit_expr(e, arg);
+                        fprintf(e->out, ")");
+                    } else {
+                        emit_expr(e, arg);
+                    }
+                } else if (strcmp(cn, "to_string") == 0) {
+                    if (arg_type && arg_type->kind == TYPE_INT) {
+                        fprintf(e->out, "sigil_int_to_string(");
+                    } else if (arg_type && (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32 || arg_type->kind == TYPE_FLOAT64)) {
+                        fprintf(e->out, "sigil_float_to_string(");
+                    } else if (arg_type && arg_type->kind == TYPE_BOOL) {
+                        fprintf(e->out, "sigil_bool_to_string(");
+                    } else if (arg_type && arg_type->kind == TYPE_CHAR) {
+                        fprintf(e->out, "sigil_char_to_string(");
+                    } else {
+                        fprintf(e->out, "sigil_int_to_string(");
+                    }
+                    emit_expr(e, arg);
+                    fprintf(e->out, ")");
+                }
+                break;
+            }
+
             /* Map operations — special-cased before builtins */
             if (is_map_op(node->call.call_name)) {
                 const char *op = node->call.call_name;
                 if (strcmp(op, "mapnew") == 0) {
                     fprintf(e->out, "sigil_map_new()");
+                } else if (strcmp(op, "set") == 0 && node->call.args.count == 4) {
+                    /* 4-arg set: double-indexed map set (e.g., matrix m[i][j] = v) */
+                    fprintf(e->out, "sigil_map_set(sigil_unbox_map(sigil_map_get(");
+                    emit_expr(e, node->call.args.items[0]);
+                    fprintf(e->out, ", ");
+                    emit_boxed(e, node->call.args.items[1]);
+                    fprintf(e->out, ")), ");
+                    emit_boxed(e, node->call.args.items[2]);
+                    fprintf(e->out, ", ");
+                    emit_boxed(e, node->call.args.items[3]);
+                    fprintf(e->out, ")");
                 } else if (strcmp(op, "set") == 0 && node->call.args.count == 3) {
                     fprintf(e->out, "sigil_map_set(");
                     emit_expr(e, node->call.args.items[0]);
@@ -585,6 +734,17 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     fprintf(e->out, ", ");
                     emit_boxed(e, node->call.args.items[2]);
                     fprintf(e->out, ")");
+                } else if (strcmp(op, "get") == 0 && node->call.args.count == 3) {
+                    /* 3-arg get: double-indexed map access (e.g., matrix m[i][j]) */
+                    TypeRef *ret = node->resolved_type;
+                    emit_unbox_prefix(e, ret);
+                    fprintf(e->out, "sigil_map_get(sigil_unbox_map(sigil_map_get(");
+                    emit_expr(e, node->call.args.items[0]);
+                    fprintf(e->out, ", ");
+                    emit_boxed(e, node->call.args.items[1]);
+                    fprintf(e->out, ")), ");
+                    emit_boxed(e, node->call.args.items[2]);
+                    fprintf(e->out, "))");
                 } else if (strcmp(op, "get") == 0 && node->call.args.count == 2) {
                     /* Determine unbox type: use resolved_type, or map's val_type */
                     TypeRef *ret = node->resolved_type;
@@ -613,13 +773,64 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     fprintf(e->out, ")");
                 } else if ((strcmp(op, "mapcount") == 0 || strcmp(op, "length") == 0) &&
                            node->call.args.count == 1) {
-                    fprintf(e->out, "sigil_map_count(");
+                    TypeRef *arg_t = infer_expr_type(e, node->call.args.items[0]);
+                    if (arg_t && (arg_t->kind == TYPE_MAP || arg_t->kind == TYPE_NAMED)) {
+                        fprintf(e->out, "sigil_map_count(");
+                        emit_expr(e, node->call.args.items[0]);
+                        fprintf(e->out, ")");
+                    } else {
+                        /* Arg type unknown — emit as sigil_unbox_map to handle
+                           cases like length(get(m, i)) where get returns unknown type
+                           but the value is actually a map */
+                        fprintf(e->out, "sigil_map_count(sigil_unbox_map(");
+                        emit_raw_map_get(e, node->call.args.items[0]);
+                        fprintf(e->out, "))");
+                    }
+                } else if (strcmp(op, "append") == 0 && node->call.args.count == 2) {
+                    fprintf(e->out, "sigil_map_append(");
+                    emit_expr(e, node->call.args.items[0]);
+                    fprintf(e->out, ", ");
+                    emit_boxed(e, node->call.args.items[1]);
+                    fprintf(e->out, ")");
+                } else if (strcmp(op, "clone") == 0 && node->call.args.count == 1) {
+                    fprintf(e->out, "sigil_map_copy(");
                     emit_expr(e, node->call.args.items[0]);
                     fprintf(e->out, ")");
+                } else if (strcmp(op, "keys") == 0 && node->call.args.count == 1) {
+                    fprintf(e->out, "sigil_map_keys(");
+                    emit_expr(e, node->call.args.items[0]);
+                    fprintf(e->out, ")");
+                } else if (strcmp(op, "values") == 0 && node->call.args.count == 1) {
+                    fprintf(e->out, "sigil_map_values(");
+                    emit_expr(e, node->call.args.items[0]);
+                    fprintf(e->out, ")");
+                } else if (strcmp(op, "concat") == 0 && node->call.args.count == 2) {
+                    fprintf(e->out, "sigil_string_concat(");
+                    emit_expr(e, node->call.args.items[0]);
+                    fprintf(e->out, ", ");
+                    emit_expr(e, node->call.args.items[1]);
+                    fprintf(e->out, ")");
+                } else {
+                    /* No matching map op signature — fall through to general fn call */
+                    goto map_op_fallthrough;
                 }
                 break;
             }
+            map_op_fallthrough: ;
             const BuiltinOp *bi = find_builtin(node->call.call_name);
+            /* Skip builtin if any arg has a non-primitive type (map, named) —
+               the user has a custom fn overload for that type combination */
+            if (bi && node->call.args.count >= 1 && strcmp(bi->name, "print") != 0) {
+                bool has_complex_arg = false;
+                for (int i = 0; i < node->call.args.count; i++) {
+                    TypeRef *at = infer_expr_type(e, node->call.args.items[i]);
+                    if (at && (at->kind == TYPE_MAP || at->kind == TYPE_NAMED)) {
+                        has_complex_arg = true;
+                        break;
+                    }
+                }
+                if (has_complex_arg) bi = NULL;
+            }
             if (bi) {
                 /* Type-aware print dispatch */
                 if (strcmp(bi->name, "print") == 0 && node->call.args.count == 1) {
@@ -637,7 +848,10 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                                 if (arg_type->val_type && arg_type->val_type->kind == TYPE_CHAR)
                                     print_fn = "sigil_print_string";
                                 else
-                                    print_fn = "sigil_print_int";
+                                    print_fn = "sigil_print_map";
+                                break;
+                            case TYPE_NAMED:
+                                print_fn = "sigil_print_map";
                                 break;
                             default:
                                 print_fn = "sigil_print_int"; break;
@@ -751,12 +965,30 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     emit_fn_name(e, node->call.call_name);
                 }
                 fprintf(e->out, "(");
-                for (int i = 0; i < node->call.args.count; i++) {
-                    if (i > 0) fprintf(e->out, ", ");
-                    if (fn && i < fn->param_count && fn->param_mutable[i]) {
-                        fprintf(e->out, "&");
+                if (fn && fn->has_repeats) {
+                    /* Emit non-repeats args normally */
+                    for (int i = 0; i < fn->repeats_start_idx && i < node->call.args.count; i++) {
+                        if (i > 0) fprintf(e->out, ", ");
+                        emit_boxed(e, node->call.args.items[i]);
                     }
-                    emit_expr(e, node->call.args.items[i]);
+                    /* Emit repeats as count + compound literal */
+                    int rcount = node->call.args.count - fn->repeats_start_idx;
+                    if (rcount < 0) rcount = 0;
+                    if (fn->repeats_start_idx > 0) fprintf(e->out, ", ");
+                    fprintf(e->out, "%d, (SigilVal[]){", rcount);
+                    for (int i = fn->repeats_start_idx; i < node->call.args.count; i++) {
+                        if (i > fn->repeats_start_idx) fprintf(e->out, ", ");
+                        emit_boxed(e, node->call.args.items[i]);
+                    }
+                    fprintf(e->out, "}");
+                } else {
+                    for (int i = 0; i < node->call.args.count; i++) {
+                        if (i > 0) fprintf(e->out, ", ");
+                        if (fn && i < fn->param_count && fn->param_mutable[i]) {
+                            fprintf(e->out, "&");
+                        }
+                        emit_expr(e, node->call.args.items[i]);
+                    }
                 }
                 fprintf(e->out, ")");
             }
@@ -891,7 +1123,7 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
             if (node->comprehension.comp_filter) {
                 fprintf(e->out, "if (!(");
                 emit_expr(e, node->comprehension.comp_filter);
-                fprintf(e->out, ")) { _comp_idx++; continue; }\n");
+                fprintf(e->out, ")) continue;\n");
             }
 
             /* Transform and store */
@@ -1110,6 +1342,16 @@ static void emit_stmt(CEmitter *e, ASTNode *node) {
             emit_indent(e);
             emit_expr(e, node);
             fprintf(e->out, ";\n");
+            break;
+
+        case NODE_BREAK:
+            emit_indent(e);
+            fprintf(e->out, "break;\n");
+            break;
+
+        case NODE_CONTINUE:
+            emit_indent(e);
+            fprintf(e->out, "continue;\n");
             break;
 
         case NODE_TYPE_DECL:
@@ -1520,6 +1762,30 @@ static void collect_transitive_mono(CEmitter *e, ASTNode *node, FnList *fns,
             collect_transitive_mono(e, node->while_stmt.condition, fns, outer);
             collect_transitive_mono(e, node->while_stmt.while_body, fns, outer);
             break;
+        case NODE_FOR:
+            collect_transitive_mono(e, node->for_stmt.iterable, fns, outer);
+            collect_transitive_mono(e, node->for_stmt.for_body, fns, outer);
+            break;
+        case NODE_MATCH:
+            collect_transitive_mono(e, node->match_stmt.match_value, fns, outer);
+            for (int i = 0; i < node->match_stmt.cases.count; i++)
+                collect_transitive_mono(e, node->match_stmt.cases.items[i], fns, outer);
+            break;
+        case NODE_CASE:
+            collect_transitive_mono(e, node->case_branch.case_pattern, fns, outer);
+            collect_transitive_mono(e, node->case_branch.case_body, fns, outer);
+            break;
+        case NODE_DEFAULT:
+            collect_transitive_mono(e, node->default_branch.default_body, fns, outer);
+            break;
+        case NODE_LAMBDA:
+            collect_transitive_mono(e, node->lambda.lambda_body, fns, outer);
+            break;
+        case NODE_COMPREHENSION:
+            collect_transitive_mono(e, node->comprehension.comp_source, fns, outer);
+            collect_transitive_mono(e, node->comprehension.comp_filter, fns, outer);
+            collect_transitive_mono(e, node->comprehension.comp_transform, fns, outer);
+            break;
         default: break;
     }
 }
@@ -1704,6 +1970,7 @@ static bool is_executable_stmt(ASTNode *node) {
     if (!node) return false;
     switch (node->kind) {
         case NODE_LET: case NODE_VAR: case NODE_ASSIGN: case NODE_RETURN:
+        case NODE_BREAK: case NODE_CONTINUE:
         case NODE_IF: case NODE_WHILE: case NODE_FOR: case NODE_MATCH:
         case NODE_CALL: case NODE_IDENT: case NODE_INT_LIT:
         case NODE_FLOAT_LIT: case NODE_BOOL_LIT: case NODE_STRING_LIT:
@@ -1726,8 +1993,8 @@ static void collect_top_stmts(ASTNode *node, FnList *stmts) {
         for (int i = 0; i < node->block.stmts.count; i++)
             collect_top_stmts(node->block.stmts.items[i], stmts);
     } else if (node->kind == NODE_IMPORT) {
-        for (int i = 0; i < node->import_decl.declarations.count; i++)
-            collect_top_stmts(node->import_decl.declarations.items[i], stmts);
+        /* Do NOT recurse into imports — imported fn bodies are emitted
+           as separate function definitions, not as top-level statements */
     } else if (node->kind == NODE_ALGEBRA || node->kind == NODE_LIBRARY) {
         for (int i = 0; i < node->algebra.declarations.count; i++)
             collect_top_stmts(node->algebra.declarations.items[i], stmts);

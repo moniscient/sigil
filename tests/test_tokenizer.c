@@ -138,6 +138,22 @@ static void test_begin_end(void) {
     intern_free(&it); arena_free(&arena);
 }
 
+static void test_do_end(void) {
+    printf("--- Do/end tokens ---\n");
+    Arena arena; arena_init(&arena);
+    InternTable it; intern_init(&it);
+    ErrorList err; error_list_init(&err, &arena);
+    Tokenizer t;
+    tokenizer_init(&t, "do end", "<test>", &it, &err, NULL);
+
+    Token t1 = tokenizer_next(&t);
+    Token t2 = tokenizer_next(&t);
+
+    ASSERT(t1.kind == TOK_DO, "do is TOK_DO");
+    ASSERT(t2.kind == TOK_END, "end is TOK_END");
+    intern_free(&it); arena_free(&arena);
+}
+
 static void test_compound_sigils(void) {
     printf("--- Compound sigils ---\n");
     Arena arena; arena_init(&arena);
@@ -190,6 +206,7 @@ int main(void) {
     test_keywords_and_idents();
     test_numbers();
     test_begin_end();
+    test_do_end();
     test_compound_sigils();
     test_comments();
 

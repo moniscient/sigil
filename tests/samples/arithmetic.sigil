@@ -12,11 +12,11 @@ fn set mat m [ int i , int j ] = int v returns void
 fn range int a .. int b returns iter
 
 fn span * returns range
-  return begin range 0 begin length context end end
+  return do range 0 do length context end end
 
 fn multiply int a @ int b returns int
   begin
-    return begin add begin times a b end begin times a b end end
+    return do add do times a b end do times a b end end
   end
 
 precedence + - * / @ ..

@@ -195,6 +195,97 @@ int main(void) {
     test_iter_all_keys();
     test_map_null_safe();
 
+    /* Extended map operations */
+    printf("--- Map: copy ---\n");
+    {
+        SigilMap *m = sigil_map_new();
+        sigil_map_set(m, make_int(1), make_int(42));
+        sigil_map_set(m, make_int(2), make_int(99));
+        SigilMap *m2 = sigil_map_copy(m);
+        ASSERT(sigil_map_count(m2) == 2, "copy has 2 entries");
+        ASSERT(sigil_map_get(m2, make_int(1)).i == 42, "copy preserves values");
+        /* Modify copy, original unchanged */
+        sigil_map_set(m2, make_int(1), make_int(0));
+        ASSERT(sigil_map_get(m, make_int(1)).i == 42, "original unchanged after copy modified");
+        sigil_map_release(m);
+        sigil_map_release(m2);
+    }
+
+    printf("--- Map: append ---\n");
+    {
+        SigilMap *m = sigil_map_new();
+        sigil_map_append(m, make_int(10));
+        sigil_map_append(m, make_int(20));
+        sigil_map_append(m, make_int(30));
+        ASSERT(sigil_map_count(m) == 3, "append creates 3 entries");
+        ASSERT(sigil_map_get(m, make_int(0)).i == 10, "append[0]=10");
+        ASSERT(sigil_map_get(m, make_int(1)).i == 20, "append[1]=20");
+        ASSERT(sigil_map_get(m, make_int(2)).i == 30, "append[2]=30");
+        sigil_map_release(m);
+    }
+
+    printf("--- Map: keys ---\n");
+    {
+        SigilMap *m = sigil_map_new();
+        sigil_map_set(m, make_int(10), make_int(1));
+        sigil_map_set(m, make_int(20), make_int(2));
+        SigilMap *k = sigil_map_keys(m);
+        ASSERT(sigil_map_count(k) == 2, "keys returns 2 entries");
+        sigil_map_release(m);
+        sigil_map_release(k);
+    }
+
+    printf("--- Map: values ---\n");
+    {
+        SigilMap *m = sigil_map_new();
+        sigil_map_set(m, make_int(10), make_int(100));
+        sigil_map_set(m, make_int(20), make_int(200));
+        SigilMap *v = sigil_map_values(m);
+        ASSERT(sigil_map_count(v) == 2, "values returns 2 entries");
+        sigil_map_release(m);
+        sigil_map_release(v);
+    }
+
+    printf("--- String: concat ---\n");
+    {
+        SigilMap *a = sigil_string_from_utf8("hello ", 6);
+        SigilMap *b = sigil_string_from_utf8("world", 5);
+        SigilMap *c = sigil_string_concat(a, b);
+        ASSERT(sigil_map_count(c) == 11, "concat length is 11");
+        ASSERT(sigil_map_get(c, make_int(0)).c == 'h', "concat[0]='h'");
+        ASSERT(sigil_map_get(c, make_int(6)).c == 'w', "concat[6]='w'");
+        sigil_map_release(a);
+        sigil_map_release(b);
+        sigil_map_release(c);
+    }
+
+    printf("--- Type: to_int ---\n");
+    {
+        ASSERT(sigil_to_int(3.7) == 3, "to_int(3.7) == 3");
+        ASSERT(sigil_to_int(-2.9) == -2, "to_int(-2.9) == -2");
+    }
+
+    printf("--- Type: to_float ---\n");
+    {
+        ASSERT(sigil_to_float(42) == 42.0, "to_float(42) == 42.0");
+    }
+
+    printf("--- Type: int_to_string ---\n");
+    {
+        SigilMap *s = sigil_int_to_string(42);
+        ASSERT(sigil_map_count(s) == 2, "int_to_string(42) has 2 chars");
+        ASSERT(sigil_map_get(s, make_int(0)).c == '4', "first char is '4'");
+        ASSERT(sigil_map_get(s, make_int(1)).c == '2', "second char is '2'");
+        sigil_map_release(s);
+    }
+
+    printf("--- Type: bool_to_string ---\n");
+    {
+        SigilMap *s = sigil_bool_to_string(true);
+        ASSERT(sigil_map_count(s) == 4, "bool_to_string(true) has 4 chars");
+        sigil_map_release(s);
+    }
+
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

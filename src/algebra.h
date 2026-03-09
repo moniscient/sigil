@@ -2,6 +2,7 @@
 #define SIGIL_ALGEBRA_H
 
 #include "ast.h"
+#include "tokenizer.h"
 #include "errors.h"
 
 /* ── Sigil Binding ───────────────────────────────────────────────── */
@@ -20,6 +21,16 @@ typedef struct {
 
 DA_TYPEDEF(SigilBinding, SigilBindingList)
 
+/* ── Alias Entry ────────────────────────────────────────────────── */
+
+typedef struct {
+    const char *from_text;   /* source token text (e.g., "{", "mul") */
+    const char *to_text;     /* target token text (e.g., "begin", "multiply") */
+    TokenKind to_kind;       /* target token kind */
+} AliasEntry;
+
+DA_TYPEDEF(AliasEntry, AliasList)
+
 /* ── Precedence Table ────────────────────────────────────────────── */
 
 typedef struct {
@@ -35,6 +46,7 @@ typedef struct AlgebraEntry {
     PrecedenceTable precedence;
     NodeList trait_decls;
     NodeList implement_blocks;
+    AliasList aliases;
 } AlgebraEntry;
 
 DA_TYPEDEF(AlgebraEntry*, AlgebraList)
@@ -64,5 +76,15 @@ SigilBinding *algebra_match_compound(AlgebraEntry *alg, const char **sigils, int
 /* Check for collision rule violations: same sigil + fixity + param types = error.
  * Returns true if no collisions found. */
 bool algebra_check_collisions(AlgebraEntry *alg, ErrorList *errors);
+
+/* Pre-parse pass: scan token stream for algebra alias declarations and apply
+ * them to use block regions. Must be called after tokenization, before parsing. */
+void alias_rewrite_tokens(TokenList *tokens, InternTable *intern_tab);
+
+/* Look up an alias in an algebra. Returns NULL if no alias matches. */
+AliasEntry *algebra_find_alias(AlgebraEntry *alg, const char *text);
+
+/* Apply an algebra's aliases to a token, modifying it in place. Returns true if aliased. */
+bool algebra_apply_alias(AlgebraEntry *alg, Token *tok, InternTable *intern_tab);
 
 #endif /* SIGIL_ALGEBRA_H */

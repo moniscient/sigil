@@ -27,6 +27,8 @@ typedef struct FnEntry {
     TypeRef **param_types;
     bool *param_mutable;     /* which params are var (mutable ref) */
     TypeRef *return_type;
+    bool has_repeats;        /* true if fn pattern contains PAT_REPEATS */
+    int repeats_start_idx;   /* param index where repeats args begin */
     struct FnEntry *next;
 } FnEntry;
 
