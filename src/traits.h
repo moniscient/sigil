@@ -70,4 +70,7 @@ void trait_register_type_owner(TraitRegistry *tr, const char *type_name, const c
 /* Find which algebra defines a type. Returns NULL if unknown/builtin. */
 const char *trait_find_type_owner(TraitRegistry *tr, const char *type_name);
 
+/* Check if a type implements a given trait. */
+bool trait_type_has_trait(TraitRegistry *tr, const char *type_name, const char *trait_name);
+
 #endif /* SIGIL_TRAITS_H */

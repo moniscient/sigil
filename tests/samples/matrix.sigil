@@ -16,21 +16,20 @@ rem Matrix literal sugar: row and matrix constructors via repeats
 fn row [ int a , repeats ] returns mat
 fn matrix [ mat a ; repeats ] returns mat
 
-rem Matrix multiply: dot product of row and column slices
+rem Dot product: sum of element-wise products across a shared dimension
+fn dot mat a int row mat b int col int n returns int
+  var acc 0
+  for k in begin range 0 n end begin
+    assign acc begin add acc begin times begin get a row k end begin get b k col end end end
+  end
+  return acc
+
+rem Matrix multiply: comprehension over row/col pairs
 fn multiply mat a @ mat b returns mat
   let rows begin length a end
   let cols begin length b end
-  var result begin map rows cols end
-  for i in begin range 0 rows end begin
-    for j in begin range 0 cols end begin
-      var acc 0
-      for k in begin range 0 begin length a end end begin
-        assign acc begin add acc begin times begin get a i k end begin get b k j end end end
-      end
-      set result i j acc
-    end
-  end
-  return result
+  let n begin length a end
+  collect from i in range 0 rows apply collect from j in range 0 cols apply dot a i b j n
 
 rem Precedence: low to high
 precedence + - * @ ..

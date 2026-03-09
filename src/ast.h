@@ -40,6 +40,13 @@ typedef enum {
     NODE_BOOL_LIT,
     NODE_STRING_LIT,
 
+    /* Closures & Comprehensions */
+    NODE_LAMBDA,       /* anonymous function value */
+    NODE_COMPREHENSION,/* collection comprehension */
+
+    /* Imports */
+    NODE_IMPORT,       /* import declaration */
+
     /* Special */
     NODE_BLOCK,        /* sequence of statements */
     NODE_PARAM,        /* function parameter */
@@ -57,6 +64,7 @@ typedef enum {
     TYPE_GENERIC,      /* type variable T */
     TYPE_TRAIT_BOUND,  /* Trait T */
     TYPE_ITER,
+    TYPE_FN,           /* function type: param types + return type */
     TYPE_UNKNOWN
 } TypeKind;
 
@@ -66,6 +74,10 @@ typedef struct TypeRef {
     const char *trait_name;   /* for TRAIT_BOUND: the trait constraining the type var */
     struct TypeRef *key_type; /* for MAP */
     struct TypeRef *val_type; /* for MAP */
+    /* for TYPE_FN (closure/function types) */
+    int fn_param_count;
+    struct TypeRef **fn_param_types;
+    struct TypeRef *fn_return_type;
 } TypeRef;
 
 /* ── Fixity (for fn pattern analysis) ────────────────────────────── */
@@ -261,6 +273,30 @@ struct ASTNode {
         struct {
             TypeRef *type;
         } type_ref;
+
+        /* NODE_LAMBDA */
+        struct {
+            int lambda_param_count;
+            TypeRef **lambda_param_types;
+            const char **lambda_param_names;
+            TypeRef *lambda_return_type;
+            ASTNode *lambda_body;
+            int lambda_id;               /* unique ID assigned during emission */
+        } lambda;
+
+        /* NODE_COMPREHENSION */
+        struct {
+            const char *comp_var;        /* iteration variable name */
+            ASTNode *comp_source;        /* collection to iterate */
+            ASTNode *comp_filter;        /* optional where clause (NULL if none) */
+            ASTNode *comp_transform;     /* the apply expression */
+        } comprehension;
+
+        /* NODE_IMPORT */
+        struct {
+            const char *import_path;     /* resolved absolute path */
+            NodeList declarations;       /* filtered: only decl nodes from imported file */
+        } import_decl;
 
         /* NODE_TYPE_DECL */
         struct {

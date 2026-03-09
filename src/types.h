@@ -69,6 +69,7 @@ bool type_compatible(TypeRef *a, TypeRef *b);
 TypeRef *make_type(Arena *a, TypeKind kind);
 TypeRef *make_named_type(Arena *a, const char *name);
 TypeRef *make_generic_type(Arena *a, const char *name);
+TypeRef *make_fn_type(Arena *a, int param_count, TypeRef **param_types, TypeRef *return_type);
 
 /* Look up a variable's type in the environment. */
 TypeRef *type_env_lookup(TypeEnv *env, const char *name);

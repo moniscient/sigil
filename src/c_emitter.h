@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "types.h"
+#include "traits.h"
 #include <stdio.h>
 
 /* Monomorphization instance: one specialization of a generic fn */
@@ -15,10 +16,21 @@ typedef struct MonoInstance {
     struct MonoInstance *next;
 } MonoInstance;
 
+/* Deferred lambda entry: static function emitted at file scope */
+typedef struct LambdaEntry {
+    int id;
+    ASTNode *lambda_node;
+    const char **capture_names;
+    TypeRef **capture_types;
+    int capture_count;
+    struct LambdaEntry *next;
+} LambdaEntry;
+
 typedef struct {
     FILE *out;
     int indent;
     TypeChecker *tc;
+    TraitRegistry *traits;     /* for trait-conditional emission */
     Arena *arena;
     const char **var_params;   /* var param names for current fn */
     int var_param_count;
@@ -26,9 +38,11 @@ typedef struct {
     const char *implement_type; /* concrete type name for implement block */
     MonoInstance *mono_instances; /* linked list of all generic specializations */
     MonoInstance *current_mono;   /* non-NULL when emitting a mono specialization */
+    LambdaEntry *lambdas;      /* deferred lambda functions to emit */
+    int lambda_counter;        /* unique ID generator for lambdas */
 } CEmitter;
 
-void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, Arena *arena);
+void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, TraitRegistry *traits, Arena *arena);
 void c_emit(CEmitter *e, ASTNode *node);
 
 #endif /* SIGIL_C_EMITTER_H */

@@ -2,10 +2,11 @@
 #include <string.h>
 #include <ctype.h>
 
-void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, Arena *arena) {
+void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, TraitRegistry *traits, Arena *arena) {
     e->out = out;
     e->indent = 0;
     e->tc = tc;
+    e->traits = traits;
     e->arena = arena;
     e->var_params = NULL;
     e->var_param_count = 0;
@@ -13,6 +14,8 @@ void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, Arena *arena) {
     e->implement_type = NULL;
     e->mono_instances = NULL;
     e->current_mono = NULL;
+    e->lambdas = NULL;
+    e->lambda_counter = 0;
 }
 
 static void emit_indent(CEmitter *e) {
@@ -67,6 +70,7 @@ static void emit_c_type(CEmitter *e, TypeRef *t) {
         case TYPE_MAP:     fprintf(e->out, "SigilMap*"); break;
         case TYPE_ITER:    fprintf(e->out, "SigilIter"); break;
         case TYPE_NAMED:   fprintf(e->out, "SigilMap*"); break;
+        case TYPE_FN:      fprintf(e->out, "SigilClosure*"); break;
         case TYPE_GENERIC:
         case TYPE_TRAIT_BOUND:
         case TYPE_UNKNOWN:
@@ -103,6 +107,7 @@ static const char *type_suffix(TypeRef *t) {
         case TYPE_NAMED: return t->name ? t->name : "named";
         case TYPE_GENERIC: return t->name ? t->name : "T";
         case TYPE_TRAIT_BOUND: return t->name ? t->name : "trait";
+        case TYPE_FN: return "fn";
         case TYPE_UNKNOWN: return "unknown";
     }
     return "unknown";
@@ -264,6 +269,18 @@ static TypeRef *infer_expr_type(CEmitter *e, ASTNode *node) {
         /* Type of begin/end is the type of the last statement */
         return infer_expr_type(e, node->block.stmts.items[node->block.stmts.count - 1]);
     }
+    if (node->kind == NODE_LAMBDA) {
+        return make_fn_type(e->arena, node->lambda.lambda_param_count,
+                           node->lambda.lambda_param_types,
+                           node->lambda.lambda_return_type);
+    }
+    if (node->kind == NODE_COMPREHENSION) {
+        TypeRef *t = make_type(e->arena, TYPE_MAP);
+        t->key_type = make_type(e->arena, TYPE_INT);
+        TypeRef *transform_t = infer_expr_type(e, node->comprehension.comp_transform);
+        t->val_type = transform_t;
+        return t;
+    }
     return make_type(e->arena, TYPE_UNKNOWN);
 }
 
@@ -283,6 +300,8 @@ static void emit_boxed(CEmitter *e, ASTNode *arg) {
         case TYPE_MAP:
         case TYPE_NAMED:
             fn = "sigil_val_map"; break;
+        case TYPE_FN:
+            fn = "sigil_val_closure"; break;
         default:
             fn = "sigil_val_int"; break;
     }
@@ -303,9 +322,138 @@ static void emit_unbox_prefix(CEmitter *e, TypeRef *t) {
         case TYPE_MAP:
         case TYPE_NAMED:
             fprintf(e->out, "sigil_unbox_map("); break;
+        case TYPE_FN:
+            fprintf(e->out, "sigil_unbox_closure("); break;
         default:
             fprintf(e->out, "sigil_unbox_int("); break;
     }
+}
+
+/* ── Lambda Capture Analysis ──────────────────────────────────────── */
+
+typedef struct { const char *names[64]; TypeRef *types[64]; int count; } CaptureList;
+
+static void collect_free_vars(CEmitter *e, ASTNode *node, const char **bound, int bound_count,
+                               CaptureList *caps) {
+    if (!node) return;
+    switch (node->kind) {
+        case NODE_IDENT: {
+            const char *name = node->ident.ident;
+            /* Check if bound locally */
+            for (int i = 0; i < bound_count; i++)
+                if (strcmp(bound[i], name) == 0) return;
+            /* Check if already captured */
+            for (int i = 0; i < caps->count; i++)
+                if (strcmp(caps->names[i], name) == 0) return;
+            /* Check if it's a variable in scope (not a function name) */
+            TypeRef *t = type_env_lookup(e->tc->global_env, name);
+            if (t && caps->count < 64) {
+                caps->names[caps->count] = name;
+                caps->types[caps->count] = t;
+                caps->count++;
+            }
+            break;
+        }
+        case NODE_CALL:
+            for (int i = 0; i < node->call.args.count; i++)
+                collect_free_vars(e, node->call.args.items[i], bound, bound_count, caps);
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < node->block.stmts.count; i++)
+                collect_free_vars(e, node->block.stmts.items[i], bound, bound_count, caps);
+            break;
+        case NODE_LET: case NODE_VAR:
+            collect_free_vars(e, node->binding.value, bound, bound_count, caps);
+            break;
+        case NODE_ASSIGN:
+            collect_free_vars(e, node->assign.value, bound, bound_count, caps);
+            break;
+        case NODE_RETURN:
+            collect_free_vars(e, node->ret.value, bound, bound_count, caps);
+            break;
+        case NODE_IF:
+            collect_free_vars(e, node->if_stmt.condition, bound, bound_count, caps);
+            collect_free_vars(e, node->if_stmt.then_body, bound, bound_count, caps);
+            for (int i = 0; i < node->if_stmt.elifs.count; i++)
+                collect_free_vars(e, node->if_stmt.elifs.items[i], bound, bound_count, caps);
+            collect_free_vars(e, node->if_stmt.else_body, bound, bound_count, caps);
+            break;
+        case NODE_WHILE:
+            collect_free_vars(e, node->while_stmt.condition, bound, bound_count, caps);
+            collect_free_vars(e, node->while_stmt.while_body, bound, bound_count, caps);
+            break;
+        case NODE_FOR:
+            collect_free_vars(e, node->for_stmt.iterable, bound, bound_count, caps);
+            /* Loop var is bound inside body */
+            {
+                const char *new_bound[65];
+                int nbc = bound_count < 64 ? bound_count : 64;
+                for (int i = 0; i < nbc; i++) new_bound[i] = bound[i];
+                new_bound[nbc] = node->for_stmt.var_name;
+                collect_free_vars(e, node->for_stmt.for_body, new_bound, nbc + 1, caps);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+/* Register a lambda for deferred emission; returns the assigned ID */
+static int register_lambda(CEmitter *e, ASTNode *node, CaptureList *caps) {
+    int id = e->lambda_counter++;
+    node->lambda.lambda_id = id;
+    LambdaEntry *le = (LambdaEntry *)arena_alloc(e->arena, sizeof(LambdaEntry));
+    le->id = id;
+    le->lambda_node = node;
+    le->capture_count = caps->count;
+    le->capture_names = (const char **)arena_alloc(e->arena, caps->count * sizeof(const char *));
+    le->capture_types = (TypeRef **)arena_alloc(e->arena, caps->count * sizeof(TypeRef *));
+    for (int i = 0; i < caps->count; i++) {
+        le->capture_names[i] = caps->names[i];
+        le->capture_types[i] = caps->types[i];
+    }
+    le->next = e->lambdas;
+    e->lambdas = le;
+    return id;
+}
+
+/* Emit a deferred lambda as a static C function */
+static void emit_lambda_function(CEmitter *e, LambdaEntry *le) {
+    ASTNode *node = le->lambda_node;
+
+    /* Emit: static <ret> _sigil_lambda_N(SigilClosure* _cl, <params>...) { ... } */
+    fprintf(e->out, "static ");
+    emit_c_type(e, node->lambda.lambda_return_type);
+    fprintf(e->out, " _sigil_lambda_%d(SigilClosure *_cl", le->id);
+    for (int i = 0; i < node->lambda.lambda_param_count; i++) {
+        fprintf(e->out, ", ");
+        emit_c_type(e, node->lambda.lambda_param_types[i]);
+        fprintf(e->out, " %s", node->lambda.lambda_param_names[i]);
+    }
+    fprintf(e->out, ") {\n");
+    e->indent++;
+
+    /* Unpack captures from _cl->captures[] */
+    for (int i = 0; i < le->capture_count; i++) {
+        emit_indent(e);
+        emit_c_type(e, le->capture_types[i]);
+        fprintf(e->out, " %s = ", le->capture_names[i]);
+        emit_unbox_prefix(e, le->capture_types[i]);
+        fprintf(e->out, "_cl->captures[%d]);\n", i);
+    }
+
+    /* Body */
+    emit_body(e, node->lambda.lambda_body);
+
+    e->indent--;
+    fprintf(e->out, "}\n\n");
+}
+
+/* ── Trait-Conditional Helper ────────────────────────────────────── */
+
+static bool type_has_trait(CEmitter *e, const char *type_name, const char *trait_name) {
+    if (!e->traits) return false;
+    return trait_find_impl(e->traits, trait_name, type_name) != NULL;
 }
 
 /* ── Expression Emission ─────────────────────────────────────────── */
@@ -638,6 +786,124 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
             break;
         }
 
+        case NODE_LAMBDA: {
+            /* Lambda was pre-collected; reuse its assigned ID */
+            int id = node->lambda.lambda_id;
+            if (id < 0) {
+                /* Fallback: not pre-collected (shouldn't happen) */
+                CaptureList caps = {.count = 0};
+                const char *bound[32];
+                int bc = node->lambda.lambda_param_count < 32 ? node->lambda.lambda_param_count : 32;
+                for (int i = 0; i < bc; i++)
+                    bound[i] = node->lambda.lambda_param_names[i];
+                collect_free_vars(e, node->lambda.lambda_body, bound, bc, &caps);
+                id = register_lambda(e, node, &caps);
+            }
+
+            /* Find capture info from the registered lambda */
+            int cap_count = 0;
+            LambdaEntry *le_found = NULL;
+            for (LambdaEntry *le = e->lambdas; le; le = le->next) {
+                if (le->id == id) { le_found = le; cap_count = le->capture_count; break; }
+            }
+
+            /* Emit closure creation as GCC statement expression */
+            fprintf(e->out, "({ SigilClosure *_cl = sigil_closure_new((void*)_sigil_lambda_%d, %d);",
+                    id, cap_count);
+            if (le_found) {
+                for (int i = 0; i < le_found->capture_count; i++) {
+                    TypeRef *ct = le_found->capture_types[i];
+                    const char *box_fn = "sigil_val_int";
+                    if (ct) {
+                        switch (ct->kind) {
+                            case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                                box_fn = "sigil_val_float"; break;
+                            case TYPE_BOOL: box_fn = "sigil_val_bool"; break;
+                            case TYPE_CHAR: box_fn = "sigil_val_char"; break;
+                            case TYPE_MAP: case TYPE_NAMED: box_fn = "sigil_val_map"; break;
+                            case TYPE_FN: box_fn = "sigil_val_closure"; break;
+                            default: box_fn = "sigil_val_int"; break;
+                        }
+                    }
+                    fprintf(e->out, " sigil_closure_set_capture(_cl, %d, %s(%s));",
+                            i, box_fn, le_found->capture_names[i]);
+                }
+            }
+            fprintf(e->out, " _cl; })");
+            break;
+        }
+
+        case NODE_COMPREHENSION: {
+            /* Emit as GCC statement expression */
+            fprintf(e->out, "({ SigilMap *_comp_result = sigil_map_new();\n");
+
+            /* Determine source type for iteration */
+            TypeRef *src_type = infer_expr_type(e, node->comprehension.comp_source);
+
+            /* Check if source is a range call */
+            ASTNode *src = node->comprehension.comp_source;
+            bool is_range = (src->kind == NODE_CALL && strcmp(src->call.call_name, "range") == 0);
+
+            if (is_range) {
+                fprintf(e->out, "SigilIter _comp_it = sigil_range(");
+                if (src->call.args.count >= 2) {
+                    emit_expr(e, src->call.args.items[0]);
+                    fprintf(e->out, ", ");
+                    emit_expr(e, src->call.args.items[1]);
+                }
+                fprintf(e->out, ");\n");
+            } else if (src_type && (src_type->kind == TYPE_MAP || src_type->kind == TYPE_NAMED)) {
+                /* Check for Associative trait */
+                const char *type_name = NULL;
+                if (src_type->kind == TYPE_NAMED) type_name = src_type->name;
+                else type_name = "map";
+
+                bool is_assoc = type_has_trait(e, type_name, "Associative");
+                (void)is_assoc; /* Used for future key-preserving semantics */
+
+                fprintf(e->out, "SigilIter _comp_it = sigil_map_iter(");
+                emit_expr(e, src);
+                fprintf(e->out, ");\n");
+            } else {
+                fprintf(e->out, "SigilIter _comp_it = ");
+                emit_expr(e, src);
+                fprintf(e->out, ";\n");
+            }
+
+            fprintf(e->out, "int64_t _comp_idx = 0;\n");
+            fprintf(e->out, "while (sigil_iter_has_next(&_comp_it)) {\n");
+
+            /* Bind iteration variable */
+            if (is_range) {
+                fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_comp_it));\n",
+                        node->comprehension.comp_var);
+            } else if (src_type && src_type->kind == TYPE_MAP && src_type->key_type) {
+                emit_c_type(e, src_type->key_type);
+                fprintf(e->out, " %s = ", node->comprehension.comp_var);
+                emit_unbox_prefix(e, src_type->key_type);
+                fprintf(e->out, "sigil_iter_next(&_comp_it));\n");
+            } else {
+                fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_comp_it));\n",
+                        node->comprehension.comp_var);
+            }
+
+            /* Filter */
+            if (node->comprehension.comp_filter) {
+                fprintf(e->out, "if (!(");
+                emit_expr(e, node->comprehension.comp_filter);
+                fprintf(e->out, ")) { _comp_idx++; continue; }\n");
+            }
+
+            /* Transform and store */
+            fprintf(e->out, "sigil_map_set(_comp_result, sigil_val_int(_comp_idx), ");
+            emit_boxed(e, node->comprehension.comp_transform);
+            fprintf(e->out, ");\n");
+            fprintf(e->out, "_comp_idx++;\n");
+            fprintf(e->out, "}\n");
+            fprintf(e->out, "_comp_result; })");
+            break;
+        }
+
         default:
             fprintf(e->out, "/* <unsupported expr %d> */0", node->kind);
             break;
@@ -654,8 +920,8 @@ static void emit_stmt(CEmitter *e, ASTNode *node) {
             emit_indent(e);
             {
                 TypeRef *t = infer_expr_type(e, node->binding.value);
-                /* Don't use const for pointer types (map, UDT) — causes warnings */
-                if (t && (t->kind == TYPE_MAP || t->kind == TYPE_NAMED))
+                /* Don't use const for pointer types (map, UDT, closures) — causes warnings */
+                if (t && (t->kind == TYPE_MAP || t->kind == TYPE_NAMED || t->kind == TYPE_FN))
                     ; /* no const */
                 else
                     fprintf(e->out, "const ");
@@ -976,6 +1242,10 @@ static void collect_fns(ASTNode *node, FnList *fns) {
             for (int i = 0; i < node->implement.methods.count; i++)
                 collect_fns(node->implement.methods.items[i], fns);
             break;
+        case NODE_IMPORT:
+            for (int i = 0; i < node->import_decl.declarations.count; i++)
+                collect_fns(node->import_decl.declarations.items[i], fns);
+            break;
         case NODE_USE:
             collect_fns(node->use_block.body, fns);
             break;
@@ -1119,6 +1389,10 @@ static void collect_mono_from_children(CEmitter *e, ASTNode *node, FnList *fns) 
             for (int i = 0; i < node->algebra.declarations.count; i++)
                 collect_mono_from_node(e, node->algebra.declarations.items[i], fns);
             break;
+        case NODE_IMPORT:
+            for (int i = 0; i < node->import_decl.declarations.count; i++)
+                collect_mono_from_node(e, node->import_decl.declarations.items[i], fns);
+            break;
         case NODE_USE:
             collect_mono_from_node(e, node->use_block.body, fns);
             break;
@@ -1134,6 +1408,14 @@ static void collect_mono_from_children(CEmitter *e, ASTNode *node, FnList *fns) 
         case NODE_TRAIT_DECL:
             for (int i = 0; i < node->trait_decl.methods.count; i++)
                 collect_mono_from_node(e, node->trait_decl.methods.items[i], fns);
+            break;
+        case NODE_LAMBDA:
+            collect_mono_from_node(e, node->lambda.lambda_body, fns);
+            break;
+        case NODE_COMPREHENSION:
+            collect_mono_from_node(e, node->comprehension.comp_source, fns);
+            collect_mono_from_node(e, node->comprehension.comp_filter, fns);
+            collect_mono_from_node(e, node->comprehension.comp_transform, fns);
             break;
         default:
             break;
@@ -1319,6 +1601,103 @@ static void emit_mono_body(CEmitter *e, MonoInstance *m) {
     e->current_mono = prev;
 }
 
+/* ── Pre-collect lambdas from the AST ────────────────────────────── */
+
+static void precollect_lambdas(CEmitter *e, ASTNode *node) {
+    if (!node) return;
+    if (node->kind == NODE_LAMBDA) {
+        CaptureList caps = {.count = 0};
+        const char *bound[32];
+        int bc = node->lambda.lambda_param_count < 32 ? node->lambda.lambda_param_count : 32;
+        for (int i = 0; i < bc; i++)
+            bound[i] = node->lambda.lambda_param_names[i];
+        collect_free_vars(e, node->lambda.lambda_body, bound, bc, &caps);
+        register_lambda(e, node, &caps);
+        /* Recurse into lambda body for nested lambdas */
+        precollect_lambdas(e, node->lambda.lambda_body);
+        return;
+    }
+    switch (node->kind) {
+        case NODE_PROGRAM:
+            for (int i = 0; i < node->program.top_level.count; i++)
+                precollect_lambdas(e, node->program.top_level.items[i]);
+            break;
+        case NODE_ALGEBRA: case NODE_LIBRARY:
+            for (int i = 0; i < node->algebra.declarations.count; i++)
+                precollect_lambdas(e, node->algebra.declarations.items[i]);
+            break;
+        case NODE_IMPORT:
+            for (int i = 0; i < node->import_decl.declarations.count; i++)
+                precollect_lambdas(e, node->import_decl.declarations.items[i]);
+            break;
+        case NODE_USE:
+            precollect_lambdas(e, node->use_block.body);
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < node->block.stmts.count; i++)
+                precollect_lambdas(e, node->block.stmts.items[i]);
+            break;
+        case NODE_FN_DECL:
+            precollect_lambdas(e, node->fn_decl.body);
+            break;
+        case NODE_IMPLEMENT:
+            for (int i = 0; i < node->implement.methods.count; i++)
+                precollect_lambdas(e, node->implement.methods.items[i]);
+            break;
+        case NODE_TRAIT_DECL:
+            for (int i = 0; i < node->trait_decl.methods.count; i++)
+                precollect_lambdas(e, node->trait_decl.methods.items[i]);
+            break;
+        case NODE_LET: case NODE_VAR:
+            precollect_lambdas(e, node->binding.value);
+            break;
+        case NODE_ASSIGN:
+            precollect_lambdas(e, node->assign.value);
+            break;
+        case NODE_RETURN:
+            precollect_lambdas(e, node->ret.value);
+            break;
+        case NODE_CALL:
+            for (int i = 0; i < node->call.args.count; i++)
+                precollect_lambdas(e, node->call.args.items[i]);
+            break;
+        case NODE_IF:
+            precollect_lambdas(e, node->if_stmt.condition);
+            precollect_lambdas(e, node->if_stmt.then_body);
+            for (int i = 0; i < node->if_stmt.elifs.count; i++)
+                precollect_lambdas(e, node->if_stmt.elifs.items[i]);
+            precollect_lambdas(e, node->if_stmt.else_body);
+            break;
+        case NODE_WHILE:
+            precollect_lambdas(e, node->while_stmt.condition);
+            precollect_lambdas(e, node->while_stmt.while_body);
+            break;
+        case NODE_FOR:
+            precollect_lambdas(e, node->for_stmt.iterable);
+            precollect_lambdas(e, node->for_stmt.for_body);
+            break;
+        case NODE_COMPREHENSION:
+            precollect_lambdas(e, node->comprehension.comp_source);
+            precollect_lambdas(e, node->comprehension.comp_filter);
+            precollect_lambdas(e, node->comprehension.comp_transform);
+            break;
+        case NODE_MATCH:
+            precollect_lambdas(e, node->match_stmt.match_value);
+            for (int i = 0; i < node->match_stmt.cases.count; i++)
+                precollect_lambdas(e, node->match_stmt.cases.items[i]);
+            break;
+        case NODE_CASE:
+            precollect_lambdas(e, node->case_branch.case_pattern);
+            precollect_lambdas(e, node->case_branch.case_body);
+            break;
+        case NODE_DEFAULT:
+            precollect_lambdas(e, node->default_branch.default_body);
+            break;
+        default:
+            break;
+    }
+}
+
 /* ── Collect top-level statements (non-fn) ───────────────────────── */
 
 static bool is_executable_stmt(ASTNode *node) {
@@ -1329,6 +1708,7 @@ static bool is_executable_stmt(ASTNode *node) {
         case NODE_CALL: case NODE_IDENT: case NODE_INT_LIT:
         case NODE_FLOAT_LIT: case NODE_BOOL_LIT: case NODE_STRING_LIT:
         case NODE_BEGIN_END: case NODE_BLOCK:
+        case NODE_LAMBDA: case NODE_COMPREHENSION:
             return true;
         default:
             return false;
@@ -1345,6 +1725,9 @@ static void collect_top_stmts(ASTNode *node, FnList *stmts) {
     } else if (node->kind == NODE_BLOCK) {
         for (int i = 0; i < node->block.stmts.count; i++)
             collect_top_stmts(node->block.stmts.items[i], stmts);
+    } else if (node->kind == NODE_IMPORT) {
+        for (int i = 0; i < node->import_decl.declarations.count; i++)
+            collect_top_stmts(node->import_decl.declarations.items[i], stmts);
     } else if (node->kind == NODE_ALGEBRA || node->kind == NODE_LIBRARY) {
         for (int i = 0; i < node->algebra.declarations.count; i++)
             collect_top_stmts(node->algebra.declarations.items[i], stmts);
@@ -1389,6 +1772,11 @@ void c_emit(CEmitter *e, ASTNode *node) {
             }
         }
     }
+
+    /* Pre-collect and emit lambda functions before everything else */
+    precollect_lambdas(e, node);
+    for (LambdaEntry *le = e->lambdas; le; le = le->next)
+        emit_lambda_function(e, le);
 
     /* Pass 1: prototypes */
     int proto_count = 0;

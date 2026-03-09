@@ -1,0 +1,13 @@
+rem Test comprehension on a map
+var m mapnew
+set m 1 10
+set m 2 20
+set m 3 30
+
+rem Double all values
+let doubled collect from k in m apply multiply begin get m k end 2
+
+for k in doubled begin
+    let val get doubled k
+    print val
+end

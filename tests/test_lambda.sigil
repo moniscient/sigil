@@ -1,0 +1,13 @@
+rem Test lambda
+let dbl lambda int x returns int begin
+    return multiply x 2
+end
+
+rem Test comprehension
+let squares collect from i in range 1 6 apply multiply i i
+
+rem Print each value
+for s in squares begin
+    let val get squares s
+    print val
+end

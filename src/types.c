@@ -32,9 +32,24 @@ bool types_equal(TypeRef *a, TypeRef *b) {
         case TYPE_MAP:
             return types_equal(a->key_type, b->key_type) &&
                    types_equal(a->val_type, b->val_type);
+        case TYPE_FN:
+            if (a->fn_param_count != b->fn_param_count) return false;
+            for (int i = 0; i < a->fn_param_count; i++)
+                if (!types_equal(a->fn_param_types[i], b->fn_param_types[i])) return false;
+            return types_equal(a->fn_return_type, b->fn_return_type);
         default:
             return true; /* primitive types match by kind */
     }
+}
+
+TypeRef *make_fn_type(Arena *a, int param_count, TypeRef **param_types, TypeRef *return_type) {
+    TypeRef *t = make_type(a, TYPE_FN);
+    t->fn_param_count = param_count;
+    t->fn_param_types = (TypeRef **)arena_alloc(a, param_count * sizeof(TypeRef *));
+    for (int i = 0; i < param_count; i++)
+        t->fn_param_types[i] = param_types[i];
+    t->fn_return_type = return_type;
+    return t;
 }
 
 bool type_compatible(TypeRef *a, TypeRef *b) {
@@ -587,6 +602,54 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
             for (int i = 0; i < node->program.top_level.count; i++)
                 check_node(tc, node->program.top_level.items[i], env);
             return make_type(tc->arena, TYPE_VOID);
+
+        case NODE_IMPORT:
+            for (int i = 0; i < node->import_decl.declarations.count; i++)
+                check_node(tc, node->import_decl.declarations.items[i], env);
+            return make_type(tc->arena, TYPE_VOID);
+
+        case NODE_LAMBDA: {
+            TypeEnv *lambda_env = type_env_push(env);
+            for (int i = 0; i < node->lambda.lambda_param_count; i++) {
+                type_env_bind(lambda_env, node->lambda.lambda_param_names[i],
+                             node->lambda.lambda_param_types[i], false);
+            }
+            TypeRef *prev_ret = tc->current_fn_return_type;
+            tc->current_fn_return_type = node->lambda.lambda_return_type;
+            check_node(tc, node->lambda.lambda_body, lambda_env);
+            tc->current_fn_return_type = prev_ret;
+            /* Build TYPE_FN */
+            result_type = make_fn_type(tc->arena, node->lambda.lambda_param_count,
+                                       node->lambda.lambda_param_types,
+                                       node->lambda.lambda_return_type);
+            node->resolved_type = result_type;
+            return result_type;
+        }
+
+        case NODE_COMPREHENSION: {
+            TypeEnv *comp_env = type_env_push(env);
+            TypeRef *src_type = check_node(tc, node->comprehension.comp_source, env);
+            /* Bind iteration variable */
+            TypeRef *elem_type = make_type(tc->arena, TYPE_UNKNOWN);
+            if (src_type && src_type->kind == TYPE_MAP && src_type->key_type)
+                elem_type = src_type->key_type;
+            type_env_bind(comp_env, node->comprehension.comp_var, elem_type, false);
+            /* Check filter */
+            if (node->comprehension.comp_filter) {
+                TypeRef *filter_t = check_node(tc, node->comprehension.comp_filter, comp_env);
+                if (filter_t->kind != TYPE_BOOL && filter_t->kind != TYPE_UNKNOWN)
+                    error_add(tc->errors, ERR_TYPE, node->loc,
+                             "comprehension 'where' clause must be bool");
+            }
+            /* Check transform */
+            TypeRef *transform_t = check_node(tc, node->comprehension.comp_transform, comp_env);
+            /* Result: map<int, transform_type> */
+            result_type = make_type(tc->arena, TYPE_MAP);
+            result_type->key_type = make_type(tc->arena, TYPE_INT);
+            result_type->val_type = transform_t;
+            node->resolved_type = result_type;
+            return result_type;
+        }
 
         case NODE_SIGIL_EXPR:
             /* Should have been desugared */

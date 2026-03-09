@@ -863,6 +863,10 @@ static ASTNode *desugar_node(Desugarer *d, ASTNode *node) {
             break;
         }
 
+        case NODE_IMPORT:
+            desugar_node_list(d, &node->import_decl.declarations);
+            break;
+
         case NODE_FN_DECL:
             node->fn_decl.body = desugar_node(d, node->fn_decl.body);
             break;

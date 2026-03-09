@@ -96,6 +96,11 @@ static void resolve_node(Resolver *r, ASTNode *node, AlgebraEntry *alg) {
                 resolve_node(r, node->program.top_level.items[i], alg);
             break;
 
+        case NODE_IMPORT:
+            for (int i = 0; i < node->import_decl.declarations.count; i++)
+                resolve_node(r, node->import_decl.declarations.items[i], alg);
+            break;
+
         case NODE_ALGEBRA:
         case NODE_LIBRARY: {
             AlgebraEntry *a = algebra_registry_find(r->algebra_reg, node->algebra.algebra_name);

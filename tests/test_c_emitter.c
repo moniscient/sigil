@@ -59,7 +59,7 @@ static char *emit_c_from_skw(const char *source) {
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
     CEmitter emitter;
-    c_emitter_init(&emitter, f, &type_checker, &arena);
+    c_emitter_init(&emitter, f, &type_checker, &trait_reg, &arena);
     c_emit(&emitter, ast);
     fclose(f);
 
@@ -82,6 +82,7 @@ static char *emit_c_from_sigil(const char *source) {
     error_list_init(&errors, &arena);
     CompoundSigilSet compounds;
     compound_sigil_set_init(&compounds);
+    prescan_compound_sigils(source, NULL, &compounds, &intern_tab);
 
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, source, "<test>", &intern_tab, &errors, &compounds);
@@ -118,7 +119,7 @@ static char *emit_c_from_sigil(const char *source) {
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
     CEmitter emitter;
-    c_emitter_init(&emitter, f, &type_checker, &arena);
+    c_emitter_init(&emitter, f, &type_checker, &trait_reg, &arena);
     c_emit(&emitter, ast);
     fclose(f);
 

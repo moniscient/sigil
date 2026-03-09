@@ -31,6 +31,7 @@ static void emit_type(SkwEmitter *e, TypeRef *t) {
         case TYPE_NAMED:   fprintf(e->out, "%s", t->name); break;
         case TYPE_GENERIC: fprintf(e->out, "%s", t->name); break;
         case TYPE_TRAIT_BOUND: fprintf(e->out, "%s %s", t->trait_name, t->name); break;
+        case TYPE_FN:      fprintf(e->out, "fn"); break;
         case TYPE_UNKNOWN: fprintf(e->out, "unknown"); break;
     }
 }
@@ -60,6 +61,11 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
                 skw_emit(e, node->program.top_level.items[i]);
                 fprintf(e->out, "\n");
             }
+            break;
+
+        case NODE_IMPORT:
+            emit_indent(e);
+            fprintf(e->out, "import \"%s\"\n", node->import_decl.import_path);
             break;
 
         case NODE_FN_DECL:
@@ -324,6 +330,36 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
                 emit_type(e, node->type_decl.field_types[i]);
                 fprintf(e->out, " %s", node->type_decl.field_names[i]);
             }
+            break;
+
+        case NODE_LAMBDA:
+            fprintf(e->out, "lambda");
+            for (int i = 0; i < node->lambda.lambda_param_count; i++) {
+                fprintf(e->out, " ");
+                emit_type(e, node->lambda.lambda_param_types[i]);
+                fprintf(e->out, " %s", node->lambda.lambda_param_names[i]);
+            }
+            if (node->lambda.lambda_return_type) {
+                fprintf(e->out, " returns ");
+                emit_type(e, node->lambda.lambda_return_type);
+            }
+            fprintf(e->out, " begin\n");
+            e->indent++;
+            emit_body(e, node->lambda.lambda_body);
+            e->indent--;
+            emit_indent(e);
+            fprintf(e->out, "end");
+            break;
+
+        case NODE_COMPREHENSION:
+            fprintf(e->out, "collect from %s in ", node->comprehension.comp_var);
+            skw_emit(e, node->comprehension.comp_source);
+            if (node->comprehension.comp_filter) {
+                fprintf(e->out, " where ");
+                skw_emit(e, node->comprehension.comp_filter);
+            }
+            fprintf(e->out, " apply ");
+            skw_emit(e, node->comprehension.comp_transform);
             break;
 
         case NODE_PARAM:

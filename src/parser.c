@@ -1,5 +1,50 @@
 #include "parser.h"
 #include <string.h>
+#include <stdlib.h>
+#include <libgen.h>
+
+/* ── ImportSet ───────────────────────────────────────────────────── */
+
+void import_set_init(ImportSet *is) {
+    is->paths = NULL;
+    is->count = is->capacity = 0;
+}
+
+bool import_set_contains(ImportSet *is, const char *path) {
+    for (int i = 0; i < is->count; i++)
+        if (strcmp(is->paths[i], path) == 0) return true;
+    return false;
+}
+
+void import_set_add(ImportSet *is, const char *path) {
+    if (import_set_contains(is, path)) return;
+    if (is->count >= is->capacity) {
+        is->capacity = is->capacity ? is->capacity * 2 : 16;
+        is->paths = realloc(is->paths, is->capacity * sizeof(const char *));
+    }
+    is->paths[is->count++] = path;
+}
+
+/* ── File reading (for import) ───────────────────────────────────── */
+
+static char *read_file_for_import(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = (char *)malloc(len + 1);
+    if (fread(buf, 1, len, f) != (size_t)len) {
+        fclose(f);
+        free(buf);
+        return NULL;
+    }
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* ── Parser init ─────────────────────────────────────────────────── */
 
 void parser_init(Parser *p, TokenList tokens, Arena *arena,
                  InternTable *intern_tab, ErrorList *errors) {
@@ -9,6 +54,9 @@ void parser_init(Parser *p, TokenList tokens, Arena *arena,
     p->intern_tab = intern_tab;
     p->errors = errors;
     p->in_sigil_mode = false;
+    p->file_path = NULL;
+    p->imports = NULL;
+    p->compounds = NULL;
 }
 
 /* ── Token Access ────────────────────────────────────────────────── */
@@ -127,6 +175,8 @@ static TypeRef *parse_type(Parser *p) {
 
 static ASTNode *parse_begin_end(Parser *p);
 static ASTNode *parse_keyword_call(Parser *p, const char *keyword, SrcLoc loc);
+static ASTNode *parse_lambda(Parser *p);
+static ASTNode *parse_collect(Parser *p);
 
 /* ── Expression Parsing ──────────────────────────────────────────── */
 
@@ -170,6 +220,12 @@ static ASTNode *parse_atom(Parser *p) {
         n->bool_lit.bool_val = strcmp(t->text, "true") == 0;
         eat(p);
         return n;
+    }
+    if (t->kind == TOK_KEYWORD && strcmp(t->text, "lambda") == 0) {
+        return parse_lambda(p);
+    }
+    if (t->kind == TOK_KEYWORD && strcmp(t->text, "collect") == 0) {
+        return parse_collect(p);
     }
     if (t->kind == TOK_BEGIN) {
         return parse_begin_end(p);
@@ -554,11 +610,122 @@ static ASTNode *parse_use(Parser *p) {
     /* Parse body: everything until next top-level keyword or EOF */
     while (!at_eof(p) &&
            !at_text(p, "algebra") && !at_text(p, "library") &&
+           !at_text(p, "import") &&
            !(at_text(p, "use") && peek(p, 1)->kind == TOK_IDENT)) {
         ASTNode *stmt = parse_statement(p);
         if (stmt) da_push(&body->block.stmts, stmt);
     }
     n->use_block.body = body;
+    return n;
+}
+
+/* ── Import ──────────────────────────────────────────────────────── */
+
+static bool is_decl_node(NodeKind kind) {
+    return kind == NODE_FN_DECL || kind == NODE_TRAIT_DECL ||
+           kind == NODE_IMPLEMENT || kind == NODE_ALGEBRA ||
+           kind == NODE_LIBRARY || kind == NODE_PRECEDENCE ||
+           kind == NODE_TYPE_DECL || kind == NODE_IMPORT;
+}
+
+static ASTNode *parse_import(Parser *p) {
+    SrcLoc loc = cur(p)->loc;
+    expect_text(p, "import");
+
+    if (at_eof(p) || cur(p)->kind != TOK_STRING_LIT) {
+        error_add(p->errors, ERR_PARSER, loc, "expected file path string after 'import'");
+        return NULL;
+    }
+
+    const char *raw_path = cur(p)->text;
+    eat(p);
+
+    /* Resolve path relative to current file's directory */
+    char resolved[4096];
+    if (raw_path[0] == '/') {
+        /* Absolute path */
+        if (!realpath(raw_path, resolved)) {
+            error_add(p->errors, ERR_PARSER, loc, "cannot resolve import path '%s'", raw_path);
+            return NULL;
+        }
+    } else {
+        /* Relative to current file's directory */
+        char dir_buf[4096];
+        if (p->file_path) {
+            snprintf(dir_buf, sizeof(dir_buf), "%s", p->file_path);
+            char *dir = dirname(dir_buf);
+            char joined[4096];
+            snprintf(joined, sizeof(joined), "%s/%s", dir, raw_path);
+            if (!realpath(joined, resolved)) {
+                error_add(p->errors, ERR_PARSER, loc, "cannot resolve import path '%s'", raw_path);
+                return NULL;
+            }
+        } else {
+            /* No file path context (e.g., string input) — try cwd */
+            if (!realpath(raw_path, resolved)) {
+                error_add(p->errors, ERR_PARSER, loc, "cannot resolve import path '%s'", raw_path);
+                return NULL;
+            }
+        }
+    }
+
+    const char *interned_path = intern_cstr(p->intern_tab, resolved);
+
+    /* Dedup: skip if already imported */
+    if (p->imports && import_set_contains(p->imports, interned_path)) {
+        ASTNode *n = ast_new(p->arena, NODE_IMPORT, loc);
+        n->import_decl.import_path = interned_path;
+        da_init(&n->import_decl.declarations);
+        return n; /* empty — already imported */
+    }
+
+    if (p->imports)
+        import_set_add(p->imports, interned_path);
+
+    /* Read the file */
+    char *source = read_file_for_import(resolved);
+    if (!source) {
+        error_add(p->errors, ERR_PARSER, loc, "cannot read import file '%s'", raw_path);
+        return NULL;
+    }
+
+    /* Pre-scan for compound sigils if .sigil file */
+    size_t plen = strlen(resolved);
+    bool is_sigil_file = (plen > 6 && strcmp(resolved + plen - 6, ".sigil") == 0);
+    if (is_sigil_file && p->compounds) {
+        prescan_compound_sigils(source, interned_path, p->compounds, p->intern_tab);
+    }
+
+    /* Tokenize the imported file */
+    Tokenizer tokenizer;
+    tokenizer_init(&tokenizer, source, interned_path, p->intern_tab, p->errors, p->compounds);
+    TokenList tokens = tokenize_all(&tokenizer);
+
+    /* Parse the imported file */
+    Parser child;
+    parser_init(&child, tokens, p->arena, p->intern_tab, p->errors);
+    child.file_path = interned_path;
+    child.imports = p->imports;
+    child.compounds = p->compounds;
+    ASTNode *imported_prog = parse_program(&child);
+
+    da_free(&tokens);
+    free(source);
+
+    /* Filter: keep only declaration nodes */
+    ASTNode *n = ast_new(p->arena, NODE_IMPORT, loc);
+    n->import_decl.import_path = interned_path;
+    da_init(&n->import_decl.declarations);
+
+    if (imported_prog && imported_prog->kind == NODE_PROGRAM) {
+        for (int i = 0; i < imported_prog->program.top_level.count; i++) {
+            ASTNode *child_node = imported_prog->program.top_level.items[i];
+            if (child_node && is_decl_node(child_node->kind)) {
+                da_push(&n->import_decl.declarations, child_node);
+            }
+        }
+    }
+
     return n;
 }
 
@@ -615,6 +782,194 @@ static ASTNode *parse_type_decl(Parser *p) {
         n->type_decl.field_types[i] = ftypes[i];
         n->type_decl.field_names[i] = fnames[i];
     }
+    return n;
+}
+
+/* ── Lambda Parsing ──────────────────────────────────────────────── */
+
+/* lambda int x int y returns int begin ... end */
+static ASTNode *parse_lambda(Parser *p) {
+    SrcLoc loc = cur(p)->loc;
+    expect_text(p, "lambda");
+
+    /* Parse parameter pairs: type name, until 'returns' */
+    TypeRef *ptypes[32];
+    const char *pnames[32];
+    int pc = 0;
+
+    while (!at_eof(p) && !at_text(p, "returns") && !at(p, TOK_BEGIN) && pc < 32) {
+        ptypes[pc] = parse_type(p);
+        pnames[pc] = cur(p)->text;
+        if (cur(p)->kind == TOK_IDENT)
+            eat(p);
+        else
+            expect(p, TOK_IDENT, "parameter name");
+        pc++;
+    }
+
+    /* returns type */
+    TypeRef *ret_type = NULL;
+    if (at_text(p, "returns")) {
+        eat(p);
+        ret_type = parse_type(p);
+    } else {
+        ret_type = (TypeRef *)arena_alloc(p->arena, sizeof(TypeRef));
+        memset(ret_type, 0, sizeof(TypeRef));
+        ret_type->kind = TYPE_VOID;
+    }
+
+    /* Body: begin...end */
+    ASTNode *body = parse_begin_end(p);
+
+    ASTNode *n = ast_new(p->arena, NODE_LAMBDA, loc);
+    n->lambda.lambda_param_count = pc;
+    n->lambda.lambda_param_types = (TypeRef **)arena_alloc(p->arena, pc * sizeof(TypeRef *));
+    n->lambda.lambda_param_names = (const char **)arena_alloc(p->arena, pc * sizeof(const char *));
+    for (int i = 0; i < pc; i++) {
+        n->lambda.lambda_param_types[i] = ptypes[i];
+        n->lambda.lambda_param_names[i] = pnames[i];
+    }
+    n->lambda.lambda_return_type = ret_type;
+    n->lambda.lambda_body = body;
+    n->lambda.lambda_id = -1; /* assigned during emission */
+    return n;
+}
+
+/* ── Comprehension Parsing ───────────────────────────────────────── */
+
+/* collect from i in source [where cond] apply transform */
+static ASTNode *parse_collect(Parser *p) {
+    SrcLoc loc = cur(p)->loc;
+    expect_text(p, "collect");
+
+    ASTNode *n = ast_new(p->arena, NODE_COMPREHENSION, loc);
+
+    /* from var in source */
+    expect_text(p, "from");
+    n->comprehension.comp_var = cur(p)->text;
+    expect(p, TOK_IDENT, "comprehension variable");
+    expect_text(p, "in");
+
+    /* Parse source expression — stops at 'where', 'apply', begin, newline */
+    {
+        Token *t = cur(p);
+        if (t->kind == TOK_KEYWORD && is_primitive_keyword(t->text)) {
+            const char *kw = t->text;
+            SrcLoc kloc = t->loc;
+            eat(p);
+            /* Collect args stopping at where/apply */
+            ASTNode *call = ast_new(p->arena, NODE_CALL, kloc);
+            call->call.call_name = kw;
+            da_init(&call->call.args);
+            while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+                   !at_text(p, "where") && !at_text(p, "apply") &&
+                   !(cur(p)->kind == TOK_KEYWORD && is_structural_keyword(cur(p)->text) &&
+                     strcmp(cur(p)->text, "where") != 0 && strcmp(cur(p)->text, "apply") != 0)) {
+                ASTNode *arg = parse_kw_arg(p);
+                da_push(&call->call.args, arg);
+            }
+            n->comprehension.comp_source = call;
+        } else if (t->kind == TOK_IDENT) {
+            /* Could be a variable name or a function call */
+            const char *name = t->text;
+            SrcLoc kloc = t->loc;
+            eat(p);
+            /* Check if followed by args before where/apply */
+            if (!at_eof(p) && !at_text(p, "where") && !at_text(p, "apply") &&
+                !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+                !(cur(p)->kind == TOK_KEYWORD && is_structural_keyword(cur(p)->text) &&
+                  strcmp(cur(p)->text, "where") != 0 && strcmp(cur(p)->text, "apply") != 0)) {
+                ASTNode *call = ast_new(p->arena, NODE_CALL, kloc);
+                call->call.call_name = name;
+                da_init(&call->call.args);
+                while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+                       !at_text(p, "where") && !at_text(p, "apply")) {
+                    ASTNode *arg = parse_kw_arg(p);
+                    da_push(&call->call.args, arg);
+                }
+                n->comprehension.comp_source = call;
+            } else {
+                ASTNode *ident = ast_new(p->arena, NODE_IDENT, kloc);
+                ident->ident.ident = name;
+                n->comprehension.comp_source = ident;
+            }
+        } else {
+            n->comprehension.comp_source = parse_expression(p);
+        }
+    }
+
+    /* Optional: where condition */
+    n->comprehension.comp_filter = NULL;
+    if (at_text(p, "where")) {
+        eat(p);
+        Token *t = cur(p);
+        if (t->kind == TOK_KEYWORD && is_primitive_keyword(t->text)) {
+            const char *kw = t->text;
+            SrcLoc kloc = t->loc;
+            eat(p);
+            ASTNode *call = ast_new(p->arena, NODE_CALL, kloc);
+            call->call.call_name = kw;
+            da_init(&call->call.args);
+            while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+                   !at_text(p, "apply")) {
+                ASTNode *arg = parse_kw_arg(p);
+                da_push(&call->call.args, arg);
+            }
+            n->comprehension.comp_filter = call;
+        } else if (t->kind == TOK_IDENT) {
+            const char *name = t->text;
+            SrcLoc kloc = t->loc;
+            eat(p);
+            if (!at_eof(p) && !at_text(p, "apply") &&
+                !at(p, TOK_END) && !at(p, TOK_NEWLINE)) {
+                ASTNode *call = ast_new(p->arena, NODE_CALL, kloc);
+                call->call.call_name = name;
+                da_init(&call->call.args);
+                while (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+                       !at_text(p, "apply")) {
+                    ASTNode *arg = parse_kw_arg(p);
+                    da_push(&call->call.args, arg);
+                }
+                n->comprehension.comp_filter = call;
+            } else {
+                ASTNode *ident = ast_new(p->arena, NODE_IDENT, kloc);
+                ident->ident.ident = name;
+                n->comprehension.comp_filter = ident;
+            }
+        } else {
+            n->comprehension.comp_filter = parse_expression(p);
+        }
+    }
+
+    /* apply transform */
+    expect_text(p, "apply");
+    {
+        Token *t = cur(p);
+        if (t->kind == TOK_KEYWORD && is_primitive_keyword(t->text)) {
+            const char *kw = t->text;
+            SrcLoc kloc = t->loc;
+            eat(p);
+            n->comprehension.comp_transform = parse_keyword_call(p, kw, kloc);
+        } else if (t->kind == TOK_IDENT) {
+            const char *name = t->text;
+            SrcLoc kloc = t->loc;
+            eat(p);
+            if (!at_eof(p) && !at(p, TOK_END) && !at(p, TOK_NEWLINE) &&
+                !(cur(p)->kind == TOK_KEYWORD && (is_structural_keyword(cur(p)->text) ||
+                                                   is_primitive_keyword(cur(p)->text)))) {
+                n->comprehension.comp_transform = parse_keyword_call(p, name, kloc);
+            } else {
+                ASTNode *ident = ast_new(p->arena, NODE_IDENT, kloc);
+                ident->ident.ident = name;
+                n->comprehension.comp_transform = ident;
+            }
+        } else if (t->kind == TOK_KEYWORD && strcmp(t->text, "lambda") == 0) {
+            n->comprehension.comp_transform = parse_lambda(p);
+        } else {
+            n->comprehension.comp_transform = parse_expression(p);
+        }
+    }
+
     return n;
 }
 
@@ -753,6 +1108,10 @@ static ASTNode *parse_let_or_var(Parser *p, bool is_var) {
 
     if (at(p, TOK_BEGIN))
         n->binding.value = parse_begin_end(p);
+    else if (cur(p)->kind == TOK_KEYWORD && strcmp(cur(p)->text, "lambda") == 0)
+        n->binding.value = parse_lambda(p);
+    else if (cur(p)->kind == TOK_KEYWORD && strcmp(cur(p)->text, "collect") == 0)
+        n->binding.value = parse_collect(p);
     else if (cur(p)->kind == TOK_KEYWORD && is_primitive_keyword(cur(p)->text)) {
         const char *kw = cur(p)->text;
         SrcLoc kloc = cur(p)->loc;
@@ -825,6 +1184,7 @@ ASTNode *parse_statement(Parser *p) {
         if (strcmp(t->text, "algebra") == 0) return parse_algebra_or_library(p, false);
         if (strcmp(t->text, "library") == 0) return parse_algebra_or_library(p, true);
         if (strcmp(t->text, "use") == 0) return parse_use(p);
+        if (strcmp(t->text, "import") == 0) return parse_import(p);
         if (strcmp(t->text, "precedence") == 0) return parse_precedence(p);
         if (strcmp(t->text, "type") == 0) return parse_type_decl(p);
         if (strcmp(t->text, "if") == 0) return parse_if(p);
@@ -835,6 +1195,9 @@ ASTNode *parse_statement(Parser *p) {
         if (strcmp(t->text, "var") == 0) return parse_let_or_var(p, true);
         if (strcmp(t->text, "assign") == 0) return parse_assign(p);
         if (strcmp(t->text, "return") == 0) return parse_return(p);
+
+        if (strcmp(t->text, "lambda") == 0) return parse_lambda(p);
+        if (strcmp(t->text, "collect") == 0) return parse_collect(p);
 
         /* Primitive keyword call: add, times, get, set, etc. */
         if (is_primitive_keyword(t->text)) {

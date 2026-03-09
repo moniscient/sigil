@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* ── Closure ─────────────────────────────────────────────────────── */
+
+typedef struct SigilClosure SigilClosure;
+
 /* ── Value Types ─────────────────────────────────────────────────── */
 
 typedef enum {
@@ -12,7 +16,8 @@ typedef enum {
     SIGIL_VAL_INT,
     SIGIL_VAL_FLOAT,
     SIGIL_VAL_CHAR,
-    SIGIL_VAL_MAP
+    SIGIL_VAL_MAP,
+    SIGIL_VAL_CLOSURE
 } SigilValKind;
 
 typedef struct SigilMap SigilMap;
@@ -25,8 +30,15 @@ typedef struct {
         double f;
         uint32_t c;
         SigilMap *m;
+        SigilClosure *cl;
     };
 } SigilVal;
+
+struct SigilClosure {
+    void *fn_ptr;
+    SigilVal *captures;
+    int capture_count;
+};
 
 /* ── Map ─────────────────────────────────────────────────────────── */
 
@@ -65,6 +77,11 @@ static inline double   sigil_unbox_float(SigilVal v)  { return v.f; }
 static inline bool     sigil_unbox_bool(SigilVal v)   { return v.b; }
 static inline uint32_t sigil_unbox_char(SigilVal v)   { return v.c; }
 static inline SigilMap* sigil_unbox_map(SigilVal v)   { return v.m; }
+static inline SigilVal sigil_val_closure(SigilClosure *v) { return (SigilVal){.kind=SIGIL_VAL_CLOSURE, .cl=v}; }
+static inline SigilClosure* sigil_unbox_closure(SigilVal v) { return v.cl; }
+
+SigilClosure *sigil_closure_new(void *fn_ptr, int capture_count);
+void sigil_closure_set_capture(SigilClosure *cl, int index, SigilVal val);
 
 /* ── Iterator ────────────────────────────────────────────────────── */
 

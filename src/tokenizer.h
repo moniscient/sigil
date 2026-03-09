@@ -59,6 +59,12 @@ void tokenizer_init(Tokenizer *t, const char *source, const char *file,
 Token tokenizer_next(Tokenizer *t);
 TokenList tokenize_all(Tokenizer *t);
 
+/* Pre-scan source to discover compound sigils from algebra declarations.
+ * Must be called before tokenization so the tokenizer knows about multi-char sigils.
+ * file_path is used to resolve relative imports (can be NULL for string input). */
+void prescan_compound_sigils(const char *source, const char *file_path,
+                             CompoundSigilSet *cs, InternTable *intern_tab);
+
 /* Check if a string is a keyword. */
 bool is_keyword(const char *s);
 bool is_structural_keyword(const char *s);

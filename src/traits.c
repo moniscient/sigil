@@ -32,6 +32,10 @@ const char *trait_find_type_owner(TraitRegistry *tr, const char *type_name) {
     return NULL;
 }
 
+bool trait_type_has_trait(TraitRegistry *tr, const char *type_name, const char *trait_name) {
+    return trait_find_impl(tr, trait_name, type_name) != NULL;
+}
+
 void trait_register_def(TraitRegistry *tr, ASTNode *trait_node) {
     assert(trait_node->kind == NODE_TRAIT_DECL);
     TraitDef *def = (TraitDef *)arena_alloc(tr->arena, sizeof(TraitDef));

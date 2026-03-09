@@ -3,6 +3,24 @@
 #include <stdio.h>
 #include <string.h>
 
+/* ── Closure ─────────────────────────────────────────────────────── */
+
+SigilClosure *sigil_closure_new(void *fn_ptr, int capture_count) {
+    SigilClosure *cl = (SigilClosure *)calloc(1, sizeof(SigilClosure));
+    cl->fn_ptr = fn_ptr;
+    cl->capture_count = capture_count;
+    if (capture_count > 0)
+        cl->captures = (SigilVal *)calloc(capture_count, sizeof(SigilVal));
+    else
+        cl->captures = NULL;
+    return cl;
+}
+
+void sigil_closure_set_capture(SigilClosure *cl, int index, SigilVal val) {
+    if (index >= 0 && index < cl->capture_count)
+        cl->captures[index] = val;
+}
+
 /* ── Map Hashing ─────────────────────────────────────────────────── */
 
 static uint32_t hash_val(SigilVal v) {
@@ -11,7 +29,8 @@ static uint32_t hash_val(SigilVal v) {
         case SIGIL_VAL_INT:   return (uint32_t)(v.i ^ (v.i >> 32));
         case SIGIL_VAL_FLOAT: { uint64_t bits; memcpy(&bits, &v.f, 8); return (uint32_t)(bits ^ (bits >> 32)); }
         case SIGIL_VAL_CHAR:  return v.c;
-        case SIGIL_VAL_MAP:   return (uint32_t)(uintptr_t)v.m;
+        case SIGIL_VAL_MAP:     return (uint32_t)(uintptr_t)v.m;
+        case SIGIL_VAL_CLOSURE: return (uint32_t)(uintptr_t)v.cl;
     }
     return 0;
 }
@@ -23,7 +42,8 @@ static bool val_eq(SigilVal a, SigilVal b) {
         case SIGIL_VAL_INT:   return a.i == b.i;
         case SIGIL_VAL_FLOAT: return a.f == b.f;
         case SIGIL_VAL_CHAR:  return a.c == b.c;
-        case SIGIL_VAL_MAP:   return a.m == b.m;
+        case SIGIL_VAL_MAP:     return a.m == b.m;
+        case SIGIL_VAL_CLOSURE: return a.cl == b.cl;
     }
     return false;
 }

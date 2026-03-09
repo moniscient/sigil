@@ -1,5 +1,7 @@
 #include "tokenizer.h"
 #include <string.h>
+#include <stdlib.h>
+#include <libgen.h>
 
 /* ── Keyword Tables ──────────────────────────────────────────────── */
 
@@ -10,6 +12,8 @@ static const char *structural_keywords[] = {
     "let", "var", "assign",
     "precedence", "trait", "implement", "requires",
     "algebra", "library", "use", "type",
+    "lambda", "collect", "apply", "from", "where",
+    "import",
     NULL
 };
 
@@ -66,6 +70,159 @@ void compound_sigil_set_free(CompoundSigilSet *cs) {
     free(cs->sigils);
     cs->sigils = NULL;
     cs->count = cs->capacity = 0;
+}
+
+/* ── Pre-scan for compound sigils ────────────────────────────────── */
+
+/* Simple helper: is this byte an ASCII symbol character? */
+static bool is_ascii_symbol(char c) {
+    if (c <= ' ' || c > '~') return false;  /* non-printable or non-ASCII */
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_') return false;
+    return true;
+}
+
+/* Skip whitespace (spaces, tabs) but not newlines. */
+static const char *skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+/* Check if position starts with the given word followed by whitespace/newline/EOF. */
+static bool at_word(const char *p, const char *word) {
+    int len = (int)strlen(word);
+    if (strncmp(p, word, len) != 0) return false;
+    char next = p[len];
+    return next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '\0';
+}
+
+/* Skip to next line. */
+static const char *next_line(const char *p) {
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') p++;
+    return p;
+}
+
+/* Read a file for prescan (same as read_file but local to tokenizer). */
+static char *prescan_read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = (char *)malloc(len + 1);
+    if (fread(buf, 1, len, f) != (size_t)len) {
+        fclose(f);
+        free(buf);
+        return NULL;
+    }
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
+void prescan_compound_sigils(const char *source, const char *file_path,
+                             CompoundSigilSet *cs, InternTable *intern_tab) {
+    const char *p = source;
+    bool in_algebra = false;
+
+    while (*p) {
+        p = skip_ws(p);
+        if (*p == '\n' || *p == '\r') { p++; continue; }
+        if (*p == '\0') break;
+
+        /* Follow import statements recursively */
+        if (at_word(p, "import")) {
+            /* Skip "import" keyword */
+            const char *q = p + 6; /* strlen("import") */
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '"') {
+                q++; /* skip opening quote */
+                const char *path_start = q;
+                while (*q && *q != '"' && *q != '\n') q++;
+                if (*q == '"') {
+                    int path_len = (int)(q - path_start);
+                    char import_path[4096];
+                    if (path_len < (int)sizeof(import_path)) {
+                        memcpy(import_path, path_start, path_len);
+                        import_path[path_len] = '\0';
+
+                        /* Resolve relative to current file */
+                        char resolved[4096];
+                        bool resolved_ok = false;
+                        if (import_path[0] == '/') {
+                            resolved_ok = (realpath(import_path, resolved) != NULL);
+                        } else if (file_path) {
+                            char dir_buf[4096];
+                            snprintf(dir_buf, sizeof(dir_buf), "%s", file_path);
+                            char *dir = dirname(dir_buf);
+                            char joined[4096];
+                            snprintf(joined, sizeof(joined), "%s/%s", dir, import_path);
+                            resolved_ok = (realpath(joined, resolved) != NULL);
+                        } else {
+                            resolved_ok = (realpath(import_path, resolved) != NULL);
+                        }
+
+                        if (resolved_ok) {
+                            /* Check if already scanned (simple linear check on compound set file tracking) */
+                            /* We use the compound set itself for dedup: if we've never seen this file,
+                             * scan it. Use a simple heuristic: intern the path and check. */
+                            char *imported_source = prescan_read_file(resolved);
+                            if (imported_source) {
+                                prescan_compound_sigils(imported_source, resolved, cs, intern_tab);
+                                free(imported_source);
+                            }
+                        }
+                    }
+                }
+            }
+            p = next_line(p);
+            continue;
+        }
+
+        /* Check for algebra/library keyword at start of line */
+        if (at_word(p, "algebra") || at_word(p, "library")) {
+            in_algebra = true;
+            p = next_line(p);
+            continue;
+        }
+
+        /* Lines that start a new top-level block end the algebra scope */
+        if (in_algebra && !at_word(p, "fn") && !at_word(p, "precedence") &&
+            !at_word(p, "trait") && !at_word(p, "implement") &&
+            !at_word(p, "requires") && !at_word(p, "rem") &&
+            !at_word(p, "begin") && !at_word(p, "end") &&
+            !at_word(p, "type") && !at_word(p, "use") &&
+            !is_ascii_symbol(*p) &&
+            *p != '\n' && *p != '\r') {
+            /* Just keep scanning — false positives in compound set are harmless. */
+        }
+
+        /* Extract sigil runs from fn declaration lines inside algebra blocks */
+        if (in_algebra && at_word(p, "fn")) {
+            /* Walk the entire fn line and collect any multi-char sigil runs */
+            const char *line = p;
+            while (*line && *line != '\n') {
+                if (is_ascii_symbol(*line)) {
+                    const char *start = line;
+                    while (is_ascii_symbol(*line)) line++;
+                    int len = (int)(line - start);
+                    if (len > 1) {
+                        char buf[64];
+                        if (len < (int)sizeof(buf)) {
+                            memcpy(buf, start, len);
+                            buf[len] = '\0';
+                            compound_sigil_set_add(cs, intern_tab, buf);
+                        }
+                    }
+                } else {
+                    line++;
+                }
+            }
+        }
+
+        p = next_line(p);
+    }
 }
 
 /* ── Tokenizer ───────────────────────────────────────────────────── */

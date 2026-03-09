@@ -69,6 +69,11 @@ int main(int argc, char **argv) {
     CompoundSigilSet compounds;
     compound_sigil_set_init(&compounds);
 
+    /* Phase 0: Pre-scan for compound sigils */
+    if (!is_skw) {
+        prescan_compound_sigils(source, input_path, &compounds, &intern_tab);
+    }
+
     /* Phase 1: Tokenize */
     Tokenizer tokenizer;
     tokenizer_init(&tokenizer, source, input_path, &intern_tab, &errors, &compounds);
@@ -80,8 +85,21 @@ int main(int argc, char **argv) {
     }
 
     /* Phase 2: Parse */
+    ImportSet imports;
+    import_set_init(&imports);
+
+    /* Resolve the input file's own path for import dedup and relative resolution */
+    char resolved_input[4096];
+    const char *resolved_file = input_path;
+    if (realpath(input_path, resolved_input))
+        resolved_file = intern_cstr(&intern_tab, resolved_input);
+    import_set_add(&imports, resolved_file);
+
     Parser parser;
     parser_init(&parser, tokens, &arena, &intern_tab, &errors);
+    parser.file_path = resolved_file;
+    parser.imports = &imports;
+    parser.compounds = &compounds;
     ASTNode *ast = parse_program(&parser);
 
     if (error_has_errors(&errors)) {
@@ -153,7 +171,7 @@ int main(int argc, char **argv) {
         }
         if (emit_c) {
             CEmitter c_emitter;
-            c_emitter_init(&c_emitter, out, &type_checker, &arena);
+            c_emitter_init(&c_emitter, out, &type_checker, &trait_reg, &arena);
             c_emit(&c_emitter, ast);
         } else {
             SkwEmitter emitter;
@@ -166,6 +184,7 @@ int main(int argc, char **argv) {
 cleanup:
     da_free(&tokens);
     compound_sigil_set_free(&compounds);
+    free(imports.paths);
     intern_free(&intern_tab);
     arena_free(&arena);
     free(source);
