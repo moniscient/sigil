@@ -35,5 +35,21 @@ fn multiply map a @ map b returns map begin
   return do collect from i in range 0 rows apply collect from j in range 0 cols apply dot a i b j n end
 end
 
-rem Precedence: low to high
-precedence + - * @ ..
+rem Infix assignment: var = expr
+fn assign_int var int a = int b returns void begin
+  assign a b
+end
+fn assign_map var map a = map b returns void begin
+  assign a b
+end
+
+rem Aliases: parentheses for expression grouping
+alias ( do
+alias ) end
+
+rem define curly braces for begin end
+alias { begin
+alias } end
+
+rem Precedence: low to high (= is lowest)
+precedence = + - * @ ..

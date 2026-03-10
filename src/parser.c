@@ -261,7 +261,7 @@ ASTNode *parse_expression(Parser *p) {
 static ASTNode *parse_begin_end(Parser *p) {
     SrcLoc loc = cur(p)->loc;
     expect(p, TOK_BEGIN, "begin");
-    ASTNode *n = ast_new(p->arena, NODE_BEGIN_END, loc);
+    ASTNode *n = ast_new(p->arena, NODE_BLOCK, loc);
     da_init(&n->block.stmts);
 
     while (!at_eof(p) && !at(p, TOK_END)) {

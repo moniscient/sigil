@@ -893,8 +893,8 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
             } else {
                 /* Check if any param is var (mutable ref) -> pass &arg */
                 FnEntry *fn = NULL;
-                /* When inside a mono body, prefer the overload that matches concrete arg types */
-                if (e->current_mono && fn_name_is_overloaded(e, node->call.call_name)) {
+                /* Prefer the overload that matches concrete arg types */
+                if (fn_name_is_overloaded(e, node->call.call_name)) {
                     /* Infer concrete arg types */
                     TypeRef *arg_types[16] = {0};
                     int argc = node->call.args.count < 16 ? node->call.args.count : 16;
@@ -916,8 +916,41 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     }
                 }
                 if (!fn) {
+                    /* Try exact name match first */
                     for (FnEntry *f = e->tc->fn_registry; f; f = f->next) {
                         if (strcmp(f->name, node->call.call_name) == 0) { fn = f; break; }
+                    }
+                    /* If found but arg types don't match, search all fns with
+                       compatible arg count for a better type match */
+                    if (fn && node->call.args.count > 0) {
+                        TypeRef *arg_types[16] = {0};
+                        int argc = node->call.args.count < 16 ? node->call.args.count : 16;
+                        for (int ai = 0; ai < argc; ai++)
+                            arg_types[ai] = infer_expr_type(e, node->call.args.items[ai]);
+                        /* Check if current fn's param types match */
+                        bool current_match = true;
+                        for (int ai = 0; ai < argc && ai < fn->param_count; ai++) {
+                            if (!arg_types[ai] || !fn->param_types[ai]) continue;
+                            if (fn->param_types[ai]->kind == TYPE_GENERIC) continue;
+                            if (!types_equal(arg_types[ai], fn->param_types[ai])) {
+                                current_match = false;
+                                break;
+                            }
+                        }
+                        if (!current_match) {
+                            /* Search for a better match among all fns with same param count */
+                            for (FnEntry *f = e->tc->fn_registry; f; f = f->next) {
+                                if (f->param_count != argc) continue;
+                                bool match = true;
+                                for (int ai = 0; ai < argc && match; ai++) {
+                                    if (!arg_types[ai] || !f->param_types[ai]) continue;
+                                    if (f->param_types[ai]->kind == TYPE_GENERIC) continue;
+                                    if (!types_equal(arg_types[ai], f->param_types[ai]))
+                                        match = false;
+                                }
+                                if (match) { fn = f; break; }
+                            }
+                        }
                     }
                 }
 
@@ -960,7 +993,7 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                         emit_fn_name(e, node->call.call_name);
                     }
                 } else if (fn) {
-                    emit_mangled_fn_name(e, node->call.call_name, fn->param_count, fn->param_types);
+                    emit_mangled_fn_name(e, fn->name, fn->param_count, fn->param_types);
                 } else {
                     emit_fn_name(e, node->call.call_name);
                 }

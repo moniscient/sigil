@@ -1,6 +1,8 @@
 #include "algebra.h"
 #include "types.h"
 #include <string.h>
+#include <stdlib.h>
+#include <libgen.h>
 
 void algebra_registry_init(AlgebraRegistry *r, Arena *arena, InternTable *intern_tab) {
     da_init(&r->algebras);
@@ -198,41 +200,159 @@ typedef struct PreAlias {
 
 #define MAX_PRE_ALGEBRAS 64
 
-void alias_rewrite_tokens(TokenList *tokens, InternTable *intern_tab) {
+/* Helper: add an alias entry to a PreAlias */
+static void pre_alias_add(PreAlias *pa, const char *from, const char *to) {
+    if (pa->count >= pa->capacity) {
+        pa->capacity = pa->capacity ? pa->capacity * 2 : 8;
+        pa->entries = realloc(pa->entries, pa->capacity * sizeof(AliasEntry));
+    }
+    AliasEntry *ae = &pa->entries[pa->count++];
+    ae->from_text = from;
+    ae->to_text = to;
+    ae->to_kind = alias_target_kind(to);
+}
+
+/* Helper: find or create a PreAlias entry by algebra name */
+static int pre_alias_find_or_create(PreAlias *algebras, int *num, const char *name) {
+    for (int k = 0; k < *num; k++)
+        if (strcmp(algebras[k].algebra_name, name) == 0) return k;
+    if (*num >= MAX_PRE_ALGEBRAS) return -1;
+    int ai = (*num)++;
+    algebras[ai].algebra_name = name;
+    algebras[ai].entries = NULL;
+    algebras[ai].count = algebras[ai].capacity = 0;
+    return ai;
+}
+
+/* Read a file for alias prescan */
+static char *alias_read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = (char *)malloc(len + 1);
+    if (fread(buf, 1, len, f) != (size_t)len) { fclose(f); free(buf); return NULL; }
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* Scan source text for algebra alias declarations (lightweight text scan like prescan_compound_sigils) */
+static void prescan_aliases_from_source(const char *source, const char *file_path,
+                                         PreAlias *algebras, int *num_algebras,
+                                         InternTable *intern_tab) {
+    /* Simple line-by-line scan of raw source text */
+    const char *p = source;
+    const char *current_algebra = NULL;
+
+    while (*p) {
+        /* Skip whitespace */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\n' || *p == '\r') { p++; continue; }
+        if (*p == '\0') break;
+
+        /* Check for import */
+        if (strncmp(p, "import", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+            const char *q = p + 6;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '"') {
+                q++;
+                const char *path_start = q;
+                while (*q && *q != '"' && *q != '\n') q++;
+                if (*q == '"') {
+                    int path_len = (int)(q - path_start);
+                    char import_path[4096];
+                    if (path_len < (int)sizeof(import_path)) {
+                        memcpy(import_path, path_start, path_len);
+                        import_path[path_len] = '\0';
+                        char resolved[4096];
+                        bool ok = false;
+                        if (import_path[0] == '/') {
+                            ok = (realpath(import_path, resolved) != NULL);
+                        } else if (file_path) {
+                            char dir_buf[4096];
+                            snprintf(dir_buf, sizeof(dir_buf), "%s", file_path);
+                            char *dir = dirname(dir_buf);
+                            char joined[4096];
+                            snprintf(joined, sizeof(joined), "%s/%s", dir, import_path);
+                            ok = (realpath(joined, resolved) != NULL);
+                        }
+                        if (ok) {
+                            char *imported = alias_read_file(resolved);
+                            if (imported) {
+                                prescan_aliases_from_source(imported, resolved, algebras, num_algebras, intern_tab);
+                                free(imported);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Check for algebra */
+        if (strncmp(p, "algebra", 7) == 0 && (p[7] == ' ' || p[7] == '\t')) {
+            const char *q = p + 7;
+            while (*q == ' ' || *q == '\t') q++;
+            const char *name_start = q;
+            while (*q && *q != ' ' && *q != '\t' && *q != '\n' && *q != '\r') q++;
+            if (q > name_start) {
+                current_algebra = intern(intern_tab, name_start, (int)(q - name_start));
+            }
+        }
+
+        /* Check for alias (within an algebra) */
+        if (current_algebra && strncmp(p, "alias", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+            const char *q = p + 5;
+            while (*q == ' ' || *q == '\t') q++;
+            const char *from_start = q;
+            while (*q && *q != ' ' && *q != '\t' && *q != '\n') q++;
+            if (q > from_start) {
+                const char *from = intern(intern_tab, from_start, (int)(q - from_start));
+                while (*q == ' ' || *q == '\t') q++;
+                const char *to_start = q;
+                while (*q && *q != ' ' && *q != '\t' && *q != '\n') q++;
+                if (q > to_start) {
+                    const char *to = intern(intern_tab, to_start, (int)(q - to_start));
+                    int ai = pre_alias_find_or_create(algebras, num_algebras, current_algebra);
+                    if (ai >= 0) pre_alias_add(&algebras[ai], from, to);
+                }
+            }
+        }
+
+        /* Check for use/library (end current algebra context) */
+        if ((strncmp(p, "use", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) ||
+            (strncmp(p, "library", 7) == 0 && (p[7] == ' ' || p[7] == '\t'))) {
+            current_algebra = NULL;
+        }
+
+        /* Skip to next line */
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+}
+
+void alias_rewrite_tokens(TokenList *tokens, InternTable *intern_tab, const char *file_path) {
     Token *t = tokens->items;
     int n = tokens->count;
 
-    /* Pass 1: Collect alias declarations from algebra blocks */
+    /* Pass 1: Collect alias declarations from algebra blocks in this file and imports */
     PreAlias algebras[MAX_PRE_ALGEBRAS];
     int num_algebras = 0;
 
+    /* Scan the token stream for algebras with aliases */
     for (int i = 0; i < n; i++) {
-        /* Look for: algebra NAME */
         if (t[i].kind == TOK_KEYWORD && strcmp(t[i].text, "algebra") == 0) {
-            /* Skip newlines to find name */
             int j = i + 1;
             while (j < n && t[j].kind == TOK_NEWLINE) j++;
             if (j >= n || t[j].kind != TOK_IDENT) continue;
 
             const char *alg_name = t[j].text;
-
-            /* Find or create entry */
-            int ai = -1;
-            for (int k = 0; k < num_algebras; k++) {
-                if (strcmp(algebras[k].algebra_name, alg_name) == 0) { ai = k; break; }
-            }
-            if (ai < 0 && num_algebras < MAX_PRE_ALGEBRAS) {
-                ai = num_algebras++;
-                algebras[ai].algebra_name = alg_name;
-                algebras[ai].entries = NULL;
-                algebras[ai].count = algebras[ai].capacity = 0;
-            }
+            int ai = pre_alias_find_or_create(algebras, &num_algebras, alg_name);
             if (ai < 0) continue;
 
-            /* Scan forward for alias declarations within this algebra */
             for (int k = j + 1; k < n; k++) {
                 if (t[k].kind == TOK_NEWLINE) continue;
-                /* Stop at next algebra/library/use/import */
                 if (t[k].kind == TOK_KEYWORD &&
                     (strcmp(t[k].text, "algebra") == 0 ||
                      strcmp(t[k].text, "library") == 0 ||
@@ -240,23 +360,43 @@ void alias_rewrite_tokens(TokenList *tokens, InternTable *intern_tab) {
                      strcmp(t[k].text, "import") == 0))
                     break;
                 if (t[k].kind == TOK_KEYWORD && strcmp(t[k].text, "alias") == 0) {
-                    /* alias FROM TO */
                     int f = k + 1;
                     while (f < n && t[f].kind == TOK_NEWLINE) f++;
                     if (f >= n) continue;
                     int g = f + 1;
                     while (g < n && t[g].kind == TOK_NEWLINE) g++;
                     if (g >= n) continue;
+                    pre_alias_add(&algebras[ai], t[f].text, t[g].text);
+                }
+            }
+        }
+    }
 
-                    if (algebras[ai].count >= algebras[ai].capacity) {
-                        algebras[ai].capacity = algebras[ai].capacity ? algebras[ai].capacity * 2 : 8;
-                        algebras[ai].entries = realloc(algebras[ai].entries,
-                            algebras[ai].capacity * sizeof(AliasEntry));
+    /* Also scan imported files for algebra aliases (source-level prescan) */
+    for (int i = 0; i < n; i++) {
+        if (t[i].kind == TOK_KEYWORD && strcmp(t[i].text, "import") == 0) {
+            int j = i + 1;
+            while (j < n && t[j].kind == TOK_NEWLINE) j++;
+            if (j < n && t[j].kind == TOK_STRING_LIT) {
+                const char *raw_path = t[j].text;
+                char resolved[4096];
+                bool ok = false;
+                if (raw_path[0] == '/') {
+                    ok = (realpath(raw_path, resolved) != NULL);
+                } else if (file_path) {
+                    char dir_buf[4096];
+                    snprintf(dir_buf, sizeof(dir_buf), "%s", file_path);
+                    char *dir = dirname(dir_buf);
+                    char joined[4096];
+                    snprintf(joined, sizeof(joined), "%s/%s", dir, raw_path);
+                    ok = (realpath(joined, resolved) != NULL);
+                }
+                if (ok) {
+                    char *imported = alias_read_file(resolved);
+                    if (imported) {
+                        prescan_aliases_from_source(imported, resolved, algebras, &num_algebras, intern_tab);
+                        free(imported);
                     }
-                    AliasEntry *ae = &algebras[ai].entries[algebras[ai].count++];
-                    ae->from_text = t[f].text;
-                    ae->to_text = t[g].text;
-                    ae->to_kind = alias_target_kind(t[g].text);
                 }
             }
         }

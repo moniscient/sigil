@@ -78,8 +78,9 @@ SigilBinding *algebra_match_compound(AlgebraEntry *alg, const char **sigils, int
 bool algebra_check_collisions(AlgebraEntry *alg, ErrorList *errors);
 
 /* Pre-parse pass: scan token stream for algebra alias declarations and apply
- * them to use block regions. Must be called after tokenization, before parsing. */
-void alias_rewrite_tokens(TokenList *tokens, InternTable *intern_tab);
+ * them to use block regions. Must be called after tokenization, before parsing.
+ * file_path is used to resolve relative imports (can be NULL for string input). */
+void alias_rewrite_tokens(TokenList *tokens, InternTable *intern_tab, const char *file_path);
 
 /* Look up an alias in an algebra. Returns NULL if no alias matches. */
 AliasEntry *algebra_find_alias(AlgebraEntry *alg, const char *text);

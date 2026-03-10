@@ -455,6 +455,13 @@ static ASTNode *ep_parse_atom(ExprParser *ep) {
         const char *kw = t->text;
         SrcLoc loc = t->loc;
         ep_eat(ep);
+        /* 0-arg primitives: just return as a call with no args */
+        if (strcmp(kw, "mapnew") == 0 || strcmp(kw, "true") == 0 || strcmp(kw, "false") == 0) {
+            ASTNode *n = ast_new(ep->d->arena, NODE_CALL, loc);
+            n->call.call_name = kw;
+            da_init(&n->call.args);
+            return n;
+        }
         return ep_parse_kw_call(ep, kw, loc);
     }
     if (t->kind == TOK_IDENT) {
@@ -630,7 +637,7 @@ static ASTNode *ep_parse_condition(ExprParser *ep) {
 
         while (!ep_at_eof(ep) && ep_cur(ep)->kind != TOK_END &&
                ep_cur(ep)->kind != TOK_BEGIN &&
-               !(ep_cur(ep)->kind == TOK_KEYWORD && (is_structural_keyword(ep_cur(ep)->text) ||
+                   !(ep_cur(ep)->kind == TOK_KEYWORD && (is_structural_keyword(ep_cur(ep)->text) ||
                                                       is_primitive_keyword(ep_cur(ep)->text)))) {
             if (ep_cur(ep)->kind == TOK_DO) {
                 ASTNode *block = ep_parse_do_end(ep);
@@ -662,7 +669,7 @@ static ASTNode *ep_parse_condition(ExprParser *ep) {
         da_init(&n->call.args);
         while (!ep_at_eof(ep) && ep_cur(ep)->kind != TOK_END &&
                ep_cur(ep)->kind != TOK_BEGIN &&
-               !(ep_cur(ep)->kind == TOK_KEYWORD && (is_structural_keyword(ep_cur(ep)->text) ||
+                   !(ep_cur(ep)->kind == TOK_KEYWORD && (is_structural_keyword(ep_cur(ep)->text) ||
                                                       is_primitive_keyword(ep_cur(ep)->text)))) {
             if (ep_cur(ep)->kind == TOK_DO) {
                 ASTNode *block = ep_parse_do_end(ep);
@@ -720,16 +727,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
         ASTNode *n = ast_new(ep->d->arena, is_var ? NODE_VAR : NODE_LET, loc);
         n->binding.bind_name = name;
 
-        if (!ep_at_eof(ep) && ep_cur(ep)->kind == TOK_DO)
-            n->binding.value = ep_parse_do_end(ep);
-        else if (!ep_at_eof(ep) && ep_cur(ep)->kind == TOK_KEYWORD &&
-                 is_primitive_keyword(ep_cur(ep)->text)) {
-            const char *kw = ep_cur(ep)->text;
-            SrcLoc kloc = ep_cur(ep)->loc;
-            ep_eat(ep);
-            n->binding.value = ep_parse_kw_call(ep, kw, kloc);
-        } else
-            n->binding.value = expr_parse_prec(ep, 0);
+        n->binding.value = expr_parse_prec(ep, 0);
         return n;
     }
 
@@ -742,16 +740,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
 
         ASTNode *n = ast_new(ep->d->arena, NODE_ASSIGN, loc);
         n->assign.assign_name = name;
-        if (!ep_at_eof(ep) && ep_cur(ep)->kind == TOK_DO)
-            n->assign.value = ep_parse_do_end(ep);
-        else if (!ep_at_eof(ep) && ep_cur(ep)->kind == TOK_KEYWORD &&
-                 is_primitive_keyword(ep_cur(ep)->text)) {
-            const char *kw = ep_cur(ep)->text;
-            SrcLoc kloc = ep_cur(ep)->loc;
-            ep_eat(ep);
-            n->assign.value = ep_parse_kw_call(ep, kw, kloc);
-        } else
-            n->assign.value = expr_parse_prec(ep, 0);
+        n->assign.value = expr_parse_prec(ep, 0);
         return n;
     }
 
@@ -760,15 +749,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
         SrcLoc loc = t->loc;
         ep_eat(ep);
         ASTNode *n = ast_new(ep->d->arena, NODE_RETURN, loc);
-        if (!ep_at_eof(ep) && ep_cur(ep)->kind == TOK_DO)
-            n->ret.value = ep_parse_do_end(ep);
-        else if (!ep_at_eof(ep) && ep_cur(ep)->kind == TOK_KEYWORD &&
-                 is_primitive_keyword(ep_cur(ep)->text)) {
-            const char *kw = ep_cur(ep)->text;
-            SrcLoc kloc = ep_cur(ep)->loc;
-            ep_eat(ep);
-            n->ret.value = ep_parse_kw_call(ep, kw, kloc);
-        } else if (!ep_at_eof(ep) && ep_cur(ep)->kind != TOK_END)
+        if (!ep_at_eof(ep) && ep_cur(ep)->kind != TOK_END)
             n->ret.value = expr_parse_prec(ep, 0);
         else
             n->ret.value = NULL;
