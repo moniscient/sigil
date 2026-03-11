@@ -31,6 +31,7 @@ static uint32_t hash_val(SigilVal v) {
         case SIGIL_VAL_CHAR:  return v.c;
         case SIGIL_VAL_MAP:     return (uint32_t)(uintptr_t)v.m;
         case SIGIL_VAL_CLOSURE: return (uint32_t)(uintptr_t)v.cl;
+        case SIGIL_VAL_THUNK:   return (uint32_t)(uintptr_t)v.t;
     }
     return 0;
 }
@@ -44,6 +45,7 @@ static bool val_eq(SigilVal a, SigilVal b) {
         case SIGIL_VAL_CHAR:  return a.c == b.c;
         case SIGIL_VAL_MAP:     return a.m == b.m;
         case SIGIL_VAL_CLOSURE: return a.cl == b.cl;
+        case SIGIL_VAL_THUNK:   return a.t == b.t;
     }
     return false;
 }
@@ -293,6 +295,7 @@ void sigil_print_map(SigilMap *m) {
             case SIGIL_VAL_CHAR:  printf("'%c'", (char)v.c); break;
             case SIGIL_VAL_MAP:   printf("<map>"); break;
             case SIGIL_VAL_CLOSURE: printf("<closure>"); break;
+            case SIGIL_VAL_THUNK: printf("<thunk>"); break;
         }
     }
     printf("}\n");

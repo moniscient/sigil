@@ -4,8 +4,8 @@ set -e
 
 SIGIL="./build/sigil"
 CC="cc"
-CFLAGS="-std=c11 -I src"
-RUNTIME="src/sigil_runtime.c"
+CFLAGS="-std=c11 -I src -pthread"
+RUNTIME="src/sigil_runtime.c src/sigil_thunk.c src/sigil_expander.c src/sigil_classifier.c src/sigil_hardware.c src/sigil_exec_seq.c src/sigil_exec_coro.c src/sigil_exec_thread.c src/sigil_exec_gpu.c src/sigil_executor.c"
 TMPDIR=$(mktemp -d)
 PASS=0
 FAIL=0
@@ -27,7 +27,7 @@ run_test() {
         return
     fi
 
-    if ! $CC $CFLAGS -o "$bin_file" "$c_file" "$RUNTIME" 2>/dev/null; then
+    if ! $CC $CFLAGS -o "$bin_file" "$c_file" $RUNTIME 2>/dev/null; then
         echo "FAIL: $name (C compilation failed)"
         cat "$c_file"
         FAIL=$((FAIL + 1))
@@ -64,7 +64,7 @@ run_sigil_test() {
         return
     fi
 
-    if ! $CC $CFLAGS -o "$bin_file" "$c_file" "$RUNTIME" 2>/dev/null; then
+    if ! $CC $CFLAGS -o "$bin_file" "$c_file" $RUNTIME 2>/dev/null; then
         echo "FAIL: $name (C compilation failed)"
         cat "$c_file"
         FAIL=$((FAIL + 1))
@@ -961,6 +961,74 @@ use A
     imprimer 99
   end" \
     "99"
+
+echo "--- Collatz sequence (thunk system) ---"
+
+run_test "collatz_step" \
+    "fn step int n returns int
+  begin
+    if equal do modulo n 2 end 0 begin
+      return do divide n 2 end
+    end else begin
+      return do divide do add do multiply 3 n end 1 end 2 end
+    end
+  end
+print do step 7 end
+print do step 10 end
+print do step 6 end" \
+    "11
+5
+3"
+
+run_test "collatz_count" \
+    "fn step int n returns int
+  begin
+    if equal do modulo n 2 end 0 begin
+      return do divide n 2 end
+    end else begin
+      return do divide do add do multiply 3 n end 1 end 2 end
+    end
+  end
+fn count int start returns int
+  begin
+    var n start
+    var steps 0
+    while greater n 1 begin
+      assign n do step n end
+      assign steps do add steps 1 end
+    end
+    return steps
+  end
+print do count 7 end
+print do count 27 end
+print do count 871 end" \
+    "11
+70
+113"
+
+run_test "collatz_orbit" \
+    "fn step int n returns int
+  begin
+    if equal do modulo n 2 end 0 begin
+      return do divide n 2 end
+    end else begin
+      return do divide do add do multiply 3 n end 1 end 2 end
+    end
+  end
+fn orbit int start returns map
+  begin
+    var n start
+    var seq do mapnew end
+    append seq n
+    while greater n 1 begin
+      assign n do step n end
+      append seq n
+    end
+    return seq
+  end
+let seq do orbit 6 end
+print seq" \
+    "{0: 6, 1: 3, 2: 5, 3: 8, 4: 4, 5: 2, 6: 1}"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

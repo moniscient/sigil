@@ -27,7 +27,16 @@
 
 ## Open Bugs
 
-(none)
+### BUG-011: Postfix sigil desugaring inside algebra fn body produces wrong call target
+- **Discovered**: 2026-03-10, during Collatz algebra implementation
+- **Category**: Codegen
+- **Severity**: Medium
+- **Reproduction**: Define a postfix sigil fn `fn step int n ~> returns int` inside an algebra. In another fn body within the same algebra, use `do n ~> end` where `n` is a local variable. The desugarer produces `n(step())` instead of `step(n)`.
+- **Observed**: `sigil_n(thunk_alloc(...))` in generated C — treats variable name `n` as the fn call target
+- **Expected**: `sigil_step(n)` — the fn name `step` should be the call target with `n` as the argument
+- **Hypothesis**: The postfix desugaring path confuses the left operand (variable `n`) with the fn name when the expression appears inside an algebra fn body rather than a `use` block
+- **Files**: `src/desugarer.c` (precedence climbing / postfix handling)
+- **Status**: Open
 
 ---
 
@@ -35,4 +44,4 @@
 
 ---
 
-Next valid BUG ID: BUG-011
+Next valid BUG ID: BUG-012

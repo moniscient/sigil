@@ -1,0 +1,54 @@
+algebra Collatz
+
+rem ── Collatz Sequence Algebra ──────────────────────────────────────
+rem
+rem The Collatz conjecture: for any positive integer n,
+rem   if n is even:  n → n / 2
+rem   if n is odd:   n → (3n + 1) / 2
+rem
+rem Sigil operators:
+rem   n ~>   = one Collatz step (postfix)
+rem   n #>   = count steps to reach 1 (postfix)
+rem   a + b  = addition
+rem   a * b  = multiplication
+rem   a / b  = integer division
+rem   a % b  = modulo
+
+rem ── Infix arithmetic ───────────────────────────────────────────────
+
+fn add int a + int b returns int
+fn times int a * int b returns int
+fn divide_int int a / int b returns int begin
+  return do divide a b end
+end
+fn mod int a % int b returns int begin
+  return do modulo a b end
+end
+
+rem ── Collatz step: postfix sigil ~> ─────────────────────────────────
+
+fn step int n ~> returns int begin
+  if equal do modulo n 2 end 0 begin
+    return do divide n 2 end
+  end else begin
+    return do divide do add do multiply 3 n end 1 end 2 end
+  end
+end
+
+rem ── Collatz count: postfix sigil #> ────────────────────────────────
+rem NOTE: uses keyword-prefix `step` instead of postfix `~>` in body
+rem       to work around BUG-011 (postfix desugaring in algebra fn bodies)
+
+fn ccount int start #> returns int begin
+  var n start
+  var steps 0
+  while greater n 1 begin
+    assign n do step n end
+    assign steps do add steps 1 end
+  end
+  return steps
+end
+
+rem ── Precedence: low to high ────────────────────────────────────────
+
+precedence + * / % ~> #>

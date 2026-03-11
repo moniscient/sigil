@@ -1,0 +1,17 @@
+import "tests/samples/collatz.sigil"
+
+use Collatz
+  rem ── Print the Collatz sequence starting from 27 ──
+  rem    (27 has 70 steps — a famously long orbit for a small number)
+  rem
+  rem Each call to step goes through the thunk system:
+  rem   1. step(n) creates a thunk with func_id for step
+  rem   2. The thunk is forced, calling the evaluator
+  rem   3. The evaluator forces the arg thunk (completed literal)
+  rem   4. The original step() runs: tests n%2, branches, returns
+
+  rem Show step count for some interesting starting values
+  print (count 7)
+  print (count 27)
+  print (count 97)
+  print (count 871)

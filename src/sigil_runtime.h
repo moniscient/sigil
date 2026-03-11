@@ -17,10 +17,12 @@ typedef enum {
     SIGIL_VAL_FLOAT,
     SIGIL_VAL_CHAR,
     SIGIL_VAL_MAP,
-    SIGIL_VAL_CLOSURE
+    SIGIL_VAL_CLOSURE,
+    SIGIL_VAL_THUNK
 } SigilValKind;
 
 typedef struct SigilMap SigilMap;
+typedef struct SigilThunk SigilThunk;
 
 typedef struct {
     SigilValKind kind;
@@ -31,6 +33,7 @@ typedef struct {
         uint32_t c;
         SigilMap *m;
         SigilClosure *cl;
+        SigilThunk *t;
     };
 } SigilVal;
 
@@ -79,6 +82,8 @@ static inline uint32_t sigil_unbox_char(SigilVal v)   { return v.c; }
 static inline SigilMap* sigil_unbox_map(SigilVal v)   { return v.m; }
 static inline SigilVal sigil_val_closure(SigilClosure *v) { return (SigilVal){.kind=SIGIL_VAL_CLOSURE, .cl=v}; }
 static inline SigilClosure* sigil_unbox_closure(SigilVal v) { return v.cl; }
+static inline SigilVal sigil_val_thunk(SigilThunk *v) { return (SigilVal){.kind=SIGIL_VAL_THUNK, .t=v}; }
+static inline SigilThunk* sigil_unbox_thunk(SigilVal v) { return v.t; }
 
 SigilClosure *sigil_closure_new(void *fn_ptr, int capture_count);
 void sigil_closure_set_capture(SigilClosure *cl, int index, SigilVal val);

@@ -16,7 +16,79 @@ void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, TraitRegistry *trai
     e->current_mono = NULL;
     e->lambdas = NULL;
     e->lambda_counter = 0;
+    e->thunk_fn_counter = 0;
+    e->thunk_fn_map = NULL;
+    e->in_thunk_arg = false;
+    e->in_fn_body = false;
+    e->current_fn_name = NULL;
 }
+
+/* ── Thunk fn mapping helpers ─────────────────────────────────────── */
+
+static int register_thunk_fn(CEmitter *e, const char *name, int param_count, TypeRef **param_types,
+                              bool is_mono, int mono_tvc, TypeRef **mono_concrete) {
+    int id = e->thunk_fn_counter++;
+    ThunkFnMap *m = (ThunkFnMap *)arena_alloc(e->arena, sizeof(ThunkFnMap));
+    m->fn_name = name;
+    m->param_count = param_count;
+    m->param_types = param_types;
+    m->func_id = id;
+    m->is_mono = is_mono;
+    m->mono_type_var_count = mono_tvc;
+    m->mono_concrete = mono_concrete;
+    m->next = e->thunk_fn_map;
+    e->thunk_fn_map = m;
+    return id;
+}
+
+static int lookup_thunk_fn_id(CEmitter *e, const char *name, int param_count, TypeRef **param_types) {
+    /* First try: match name + param_count + param_types (for overloaded fns) */
+    if (param_types) {
+        for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+            if (strcmp(m->fn_name, name) != 0) continue;
+            if (m->is_mono) continue;
+            if (m->param_count != param_count) continue;
+            if (!m->param_types) continue;
+            bool match = true;
+            for (int i = 0; i < param_count && match; i++) {
+                if (!param_types[i] || !m->param_types[i]) continue;
+                if (m->param_types[i]->kind == TYPE_GENERIC ||
+                    m->param_types[i]->kind == TYPE_TRAIT_BOUND) continue;
+                if (!types_equal(param_types[i], m->param_types[i]))
+                    match = false;
+            }
+            if (match) return m->func_id;
+        }
+    }
+    /* Second try: match name + param_count */
+    for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+        if (strcmp(m->fn_name, name) != 0) continue;
+        if (m->is_mono) continue;
+        if (m->param_count == param_count) return m->func_id;
+    }
+    /* Last resort: any match by name */
+    for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+        if (strcmp(m->fn_name, name) == 0 && !m->is_mono) return m->func_id;
+    }
+    return -1;
+}
+
+static int lookup_thunk_mono_id(CEmitter *e, const char *name, int tvc, TypeRef **conc) {
+    for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+        if (!m->is_mono) continue;
+        if (strcmp(m->fn_name, name) != 0) continue;
+        if (m->mono_type_var_count != tvc) continue;
+        bool match = true;
+        for (int i = 0; i < tvc; i++) {
+            if (!types_equal(m->mono_concrete[i], conc[i])) { match = false; break; }
+        }
+        if (match) return m->func_id;
+    }
+    return -1;
+}
+
+/* Check if a call name refers to a user-defined (non-builtin) fn */
+static bool is_user_fn(CEmitter *e, const char *name);
 
 static void emit_indent(CEmitter *e) {
     for (int i = 0; i < e->indent; i++)
@@ -204,6 +276,28 @@ static TypeDef *find_type_def(CEmitter *e, const char *name) {
     return type_def_lookup(e->tc, name);
 }
 
+/* ── is_user_fn: check if a call refers to a user-defined fn ────── */
+
+static bool is_user_fn(CEmitter *e, const char *name) {
+    if (!name) return false;
+    /* Builtins, map ops, type conversions, invoke are NOT user fns */
+    if (find_builtin(name)) return false;
+    if (is_map_op(name)) return false;
+    if (is_type_conversion(name)) return false;
+    if (is_invoke_call(name)) return false;
+    /* UDT constructors are not user fns (they're inline map creation) */
+    if (find_type_def(e, name)) return false;
+    /* Check if it's in the thunk fn map */
+    for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+        if (strcmp(m->fn_name, name) == 0) return true;
+    }
+    /* Check fn registry */
+    for (FnEntry *f = e->tc->fn_registry; f; f = f->next) {
+        if (strcmp(f->name, name) == 0) return true;
+    }
+    return false;
+}
+
 /* ── Forward declarations ────────────────────────────────────────── */
 
 static void emit_expr(CEmitter *e, ASTNode *node);
@@ -213,6 +307,16 @@ static void emit_body(CEmitter *e, ASTNode *node);
 static TypeRef *infer_expr_type(CEmitter *e, ASTNode *node);
 static bool fn_entry_is_generic(FnEntry *fn);
 static void extract_type_vars(ASTNode *fn, const char **names, int *count);
+static void emit_arg_as_thunk(CEmitter *e, ASTNode *arg);
+static void emit_ctor_expr_raw(CEmitter *e, ASTNode *node, int param_count, const char **pnames);
+static void emit_ctor_cond(CEmitter *e, ASTNode *cond, int param_count, const char **pnames);
+static void emit_ctor_arg_val(CEmitter *e, ASTNode *node, int param_count, const char **pnames);
+static int count_recursive_calls(CEmitter *e, ASTNode *node, const char *fn_name);
+static ASTNode *find_return_expr(ASTNode *body);
+static void collect_recursive_thunks_to_result(CEmitter *e, ASTNode *node, const char *self_name,
+                                                int self_id, int param_count, const char **pnames);
+static void emit_recursive_child_assignments(CEmitter *e, ASTNode *node, const char *self_name,
+                                              int self_id, int param_count, const char **pnames);
 
 /* Emit a `get` result as raw SigilVal (no unboxing). Handles begin/end wrapping. */
 static void emit_raw_map_get(CEmitter *e, ASTNode *node) {
@@ -233,6 +337,60 @@ static void emit_raw_map_get(CEmitter *e, ASTNode *node) {
         emit_expr(e, node);
         fprintf(e->out, ")");
     }
+}
+
+/* ── Quick thunk ID lookup (simplified, for arg emission) ────────── */
+
+static int quick_thunk_lookup(CEmitter *e, const char *name, int argc) {
+    /* First try exact param count match (non-mono) */
+    for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+        if (m->is_mono) continue;
+        if (strcmp(m->fn_name, name) == 0 && m->param_count == argc)
+            return m->func_id;
+    }
+    /* Try mono instances */
+    for (ThunkFnMap *m = e->thunk_fn_map; m; m = m->next) {
+        if (!m->is_mono) continue;
+        if (strcmp(m->fn_name, name) == 0 && m->param_count == argc)
+            return m->func_id;
+    }
+    return -1;
+}
+
+/* ── Emit an expression as a SigilThunk* (for lazy arg passing) ──── */
+
+static void emit_arg_as_thunk(CEmitter *e, ASTNode *arg) {
+    if (!arg) {
+        fprintf(e->out, "thunk_alloc_completed(&_arena, sigil_val_int(0))");
+        return;
+    }
+
+    /* If arg is a user fn call with a thunk_id, emit a PENDING thunk */
+    if (arg->kind == NODE_CALL) {
+        const char *cn = arg->call.call_name;
+        /* Skip builtins, map ops, type conversions, invoke, UDT constructors */
+        if (!find_builtin(cn) && !is_map_op(cn) && !is_type_conversion(cn) &&
+            !is_invoke_call(cn) && !find_type_def(e, cn)) {
+            int call_arity = arg->call.args.count;
+            int tid = quick_thunk_lookup(e, cn, call_arity);
+            if (tid >= 0) {
+                /* Emit PENDING child thunk */
+                fprintf(e->out, "({ SigilThunk *_tk = thunk_alloc(&_arena, %d, %d);", tid, call_arity);
+                for (int i = 0; i < call_arity; i++) {
+                    fprintf(e->out, " _tk->args[%d] = ", i);
+                    emit_arg_as_thunk(e, arg->call.args.items[i]);
+                    fprintf(e->out, ";");
+                }
+                fprintf(e->out, " _tk; })");
+                return;
+            }
+        }
+    }
+
+    /* Default: wrap the concrete value in a completed thunk */
+    fprintf(e->out, "thunk_alloc_completed(&_arena, ");
+    emit_boxed(e, arg);
+    fprintf(e->out, ")");
 }
 
 /* ── Type inference for expressions (uses TypeChecker env) ───────── */
@@ -891,16 +1049,15 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     fprintf(e->out, ")");
                 }
             } else {
+                /* User-defined function call */
                 /* Check if any param is var (mutable ref) -> pass &arg */
                 FnEntry *fn = NULL;
                 /* Prefer the overload that matches concrete arg types */
                 if (fn_name_is_overloaded(e, node->call.call_name)) {
-                    /* Infer concrete arg types */
                     TypeRef *arg_types[16] = {0};
                     int argc = node->call.args.count < 16 ? node->call.args.count : 16;
                     for (int ai = 0; ai < argc; ai++)
                         arg_types[ai] = infer_expr_type(e, node->call.args.items[ai]);
-                    /* Find best matching FnEntry */
                     for (FnEntry *f = e->tc->fn_registry; f; f = f->next) {
                         if (strcmp(f->name, node->call.call_name) != 0) continue;
                         if (f->param_count != argc) continue;
@@ -916,18 +1073,14 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     }
                 }
                 if (!fn) {
-                    /* Try exact name match first */
                     for (FnEntry *f = e->tc->fn_registry; f; f = f->next) {
                         if (strcmp(f->name, node->call.call_name) == 0) { fn = f; break; }
                     }
-                    /* If found but arg types don't match, search all fns with
-                       compatible arg count for a better type match */
                     if (fn && node->call.args.count > 0) {
                         TypeRef *arg_types[16] = {0};
                         int argc = node->call.args.count < 16 ? node->call.args.count : 16;
                         for (int ai = 0; ai < argc; ai++)
                             arg_types[ai] = infer_expr_type(e, node->call.args.items[ai]);
-                        /* Check if current fn's param types match */
                         bool current_match = true;
                         for (int ai = 0; ai < argc && ai < fn->param_count; ai++) {
                             if (!arg_types[ai] || !fn->param_types[ai]) continue;
@@ -938,7 +1091,6 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                             }
                         }
                         if (!current_match) {
-                            /* Search for a better match among all fns with same param count */
                             for (FnEntry *f = e->tc->fn_registry; f; f = f->next) {
                                 if (f->param_count != argc) continue;
                                 bool match = true;
@@ -954,11 +1106,18 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     }
                 }
 
-                if (fn && fn_entry_is_generic(fn)) {
-                    /* Generic fn call: mangle with concrete arg types */
+                /* Determine thunk func_id for this call */
+                int thunk_id = -1;
+                bool is_generic_call = fn && fn_entry_is_generic(fn);
+                int call_arity = node->call.args.count;
+                TypeRef *call_ret = node->resolved_type;
+
+                if (is_generic_call) {
+                    /* Look up mono instance func_id */
                     const char *tv_names[16];
                     int tvc = 0;
                     ASTNode *fn_ast = NULL;
+                    TypeRef *conc[16] = {0};
                     for (MonoInstance *mi = e->mono_instances; mi; mi = mi->next) {
                         if (strcmp(mi->fn_name, node->call.call_name) == 0) {
                             fn_ast = mi->fn_node;
@@ -967,7 +1126,6 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                     }
                     if (fn_ast) {
                         extract_type_vars(fn_ast, tv_names, &tvc);
-                        TypeRef *conc[16] = {0};
                         for (int pi = 0; pi < fn_ast->fn_decl.pattern.count; pi++) {
                             PatElem *pe = &fn_ast->fn_decl.pattern.items[pi];
                             if (pe->kind != PAT_PARAM) continue;
@@ -986,44 +1144,203 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
                                 }
                             }
                         }
-                        fprintf(e->out, "sigil_%s", node->call.call_name);
                         for (int k = 0; k < tvc; k++)
-                            fprintf(e->out, "_%s", type_suffix(conc[k] ? conc[k] : make_type(e->arena, TYPE_INT)));
+                            if (!conc[k]) conc[k] = make_type(e->arena, TYPE_INT);
+                        thunk_id = lookup_thunk_mono_id(e, node->call.call_name, tvc, conc);
+                    }
+                } else {
+                    /* Infer arg types for overload-aware lookup */
+                    TypeRef *lookup_types[16] = {0};
+                    int lookup_argc = call_arity < 16 ? call_arity : 16;
+                    for (int ai = 0; ai < lookup_argc; ai++)
+                        lookup_types[ai] = infer_expr_type(e, node->call.args.items[ai]);
+                    thunk_id = lookup_thunk_fn_id(e, node->call.call_name, call_arity, lookup_types);
+                }
+
+                /* Skip thunk wrapping for var-param (mutable ref) fns — can't lazily mutate */
+                bool has_var_param = false;
+                if (fn) {
+                    for (int i = 0; i < fn->param_count; i++) {
+                        if (fn->param_mutable[i]) { has_var_param = true; break; }
+                    }
+                }
+
+                /* If inside a fn body, emit direct C call (no thunk wrapping) */
+                if (e->in_fn_body && thunk_id >= 0 && !(fn && fn->has_repeats) && !has_var_param) {
+                    /* Direct call to the C function */
+                    if (is_generic_call) {
+                        const char *tv_names[16];
+                        int tvc = 0;
+                        ASTNode *fn_ast = NULL;
+                        TypeRef *conc[16] = {0};
+                        for (MonoInstance *mi = e->mono_instances; mi; mi = mi->next) {
+                            if (strcmp(mi->fn_name, node->call.call_name) == 0) {
+                                fn_ast = mi->fn_node;
+                                break;
+                            }
+                        }
+                        if (fn_ast) {
+                            extract_type_vars(fn_ast, tv_names, &tvc);
+                            for (int pi = 0; pi < fn_ast->fn_decl.pattern.count; pi++) {
+                                PatElem *pe = &fn_ast->fn_decl.pattern.items[pi];
+                                if (pe->kind != PAT_PARAM) continue;
+                                if (pe->type && (pe->type->kind == TYPE_GENERIC || pe->type->kind == TYPE_TRAIT_BOUND)) {
+                                    int arg_idx = 0;
+                                    for (int j = 0; j < pi; j++)
+                                        if (fn_ast->fn_decl.pattern.items[j].kind == PAT_PARAM) arg_idx++;
+                                    TypeRef *arg_t = NULL;
+                                    if (arg_idx < node->call.args.count)
+                                        arg_t = infer_expr_type(e, node->call.args.items[arg_idx]);
+                                    if (!arg_t) arg_t = make_type(e->arena, TYPE_INT);
+                                    for (int k = 0; k < tvc; k++) {
+                                        if (strcmp(tv_names[k], pe->type->name) == 0)
+                                            conc[k] = arg_t;
+                                    }
+                                }
+                            }
+                            for (int k = 0; k < tvc; k++)
+                                if (!conc[k]) conc[k] = make_type(e->arena, TYPE_INT);
+                            fprintf(e->out, "sigil_%s", node->call.call_name);
+                            for (int k = 0; k < tvc; k++)
+                                fprintf(e->out, "_%s", type_suffix(conc[k]));
+                        } else {
+                            emit_mangled_fn_name(e, node->call.call_name, call_arity, NULL);
+                        }
+                    } else {
+                        int mpc = 0;
+                        TypeRef *mptypes[16] = {0};
+                        for (int ai = 0; ai < call_arity && ai < 16; ai++)
+                            mptypes[mpc++] = infer_expr_type(e, node->call.args.items[ai]);
+                        emit_mangled_fn_name(e, node->call.call_name, mpc, mptypes);
+                    }
+                    fprintf(e->out, "(");
+                    for (int i = 0; i < call_arity; i++) {
+                        if (i > 0) fprintf(e->out, ", ");
+                        emit_expr(e, node->call.args.items[i]);
+                    }
+                    fprintf(e->out, ")");
+                }
+                /* If we have a thunk_id, emit thunk creation + immediate force */
+                else if (thunk_id >= 0 && !(fn && fn->has_repeats) && !has_var_param) {
+                    /* Determine return type for unboxing */
+                    if (!call_ret && fn)
+                        call_ret = fn->return_type;
+                    /* In mono context, substitute generic return types */
+                    if (call_ret) {
+                        TypeRef *sub = mono_substitute(e, call_ret);
+                        if (sub) call_ret = sub;
+                    }
+                    /* Also try inferring from the call expression */
+                    if (!call_ret || call_ret->kind == TYPE_GENERIC ||
+                        call_ret->kind == TYPE_TRAIT_BOUND || call_ret->kind == TYPE_UNKNOWN) {
+                        TypeRef *inferred = infer_expr_type(e, node);
+                        if (inferred && inferred->kind != TYPE_UNKNOWN &&
+                            inferred->kind != TYPE_GENERIC)
+                            call_ret = inferred;
+                    }
+                    /* Emit thunk with lazy child thunks and execute_val forcing */
+                    fprintf(e->out, "({ SigilThunk *_tk = thunk_alloc(&_arena, %d, %d);",
+                            thunk_id, call_arity);
+                    for (int i = 0; i < call_arity; i++) {
+                        fprintf(e->out, " _tk->args[%d] = ", i);
+                        emit_arg_as_thunk(e, node->call.args.items[i]);
+                        fprintf(e->out, ";");
+                    }
+                    fprintf(e->out, " ");
+                    /* Force via executor pipeline (expand → classify → dispatch) and unbox */
+                    if (call_ret) {
+                        switch (call_ret->kind) {
+                            case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                                fprintf(e->out, "sigil_unbox_int(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                            case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                                fprintf(e->out, "sigil_unbox_float(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                            case TYPE_BOOL:
+                                fprintf(e->out, "sigil_unbox_bool(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                            case TYPE_CHAR:
+                                fprintf(e->out, "sigil_unbox_char(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                            case TYPE_MAP: case TYPE_NAMED:
+                                fprintf(e->out, "sigil_unbox_map(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                            case TYPE_FN:
+                                fprintf(e->out, "sigil_unbox_closure(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                            case TYPE_VOID:
+                                fprintf(e->out, "(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw), (void)0)"); break;
+                            default:
+                                fprintf(e->out, "sigil_unbox_int(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))"); break;
+                        }
+                    } else {
+                        fprintf(e->out, "sigil_unbox_int(sigil_execute_val(sigil_val_thunk(_tk), &_arena, &_hw))");
+                    }
+                    fprintf(e->out, "; })");
+                } else {
+                    /* Fallback: direct call (no thunk_id found, or repeats params) */
+                    if (is_generic_call) {
+                        const char *tv_names[16];
+                        int tvc = 0;
+                        ASTNode *fn_ast = NULL;
+                        for (MonoInstance *mi = e->mono_instances; mi; mi = mi->next) {
+                            if (strcmp(mi->fn_name, node->call.call_name) == 0) {
+                                fn_ast = mi->fn_node;
+                                break;
+                            }
+                        }
+                        if (fn_ast) {
+                            extract_type_vars(fn_ast, tv_names, &tvc);
+                            TypeRef *conc[16] = {0};
+                            for (int pi = 0; pi < fn_ast->fn_decl.pattern.count; pi++) {
+                                PatElem *pe = &fn_ast->fn_decl.pattern.items[pi];
+                                if (pe->kind != PAT_PARAM) continue;
+                                if (pe->type && (pe->type->kind == TYPE_GENERIC || pe->type->kind == TYPE_TRAIT_BOUND)) {
+                                    int arg_idx = 0;
+                                    for (int j = 0; j < pi; j++)
+                                        if (fn_ast->fn_decl.pattern.items[j].kind == PAT_PARAM)
+                                            arg_idx++;
+                                    TypeRef *arg_t = NULL;
+                                    if (arg_idx < node->call.args.count)
+                                        arg_t = infer_expr_type(e, node->call.args.items[arg_idx]);
+                                    if (!arg_t) arg_t = make_type(e->arena, TYPE_INT);
+                                    for (int k = 0; k < tvc; k++) {
+                                        if (strcmp(tv_names[k], pe->type->name) == 0)
+                                            conc[k] = arg_t;
+                                    }
+                                }
+                            }
+                            fprintf(e->out, "sigil_%s", node->call.call_name);
+                            for (int k = 0; k < tvc; k++)
+                                fprintf(e->out, "_%s", type_suffix(conc[k] ? conc[k] : make_type(e->arena, TYPE_INT)));
+                        } else {
+                            emit_fn_name(e, node->call.call_name);
+                        }
+                    } else if (fn) {
+                        emit_mangled_fn_name(e, fn->name, fn->param_count, fn->param_types);
                     } else {
                         emit_fn_name(e, node->call.call_name);
                     }
-                } else if (fn) {
-                    emit_mangled_fn_name(e, fn->name, fn->param_count, fn->param_types);
-                } else {
-                    emit_fn_name(e, node->call.call_name);
-                }
-                fprintf(e->out, "(");
-                if (fn && fn->has_repeats) {
-                    /* Emit non-repeats args normally */
-                    for (int i = 0; i < fn->repeats_start_idx && i < node->call.args.count; i++) {
-                        if (i > 0) fprintf(e->out, ", ");
-                        emit_boxed(e, node->call.args.items[i]);
-                    }
-                    /* Emit repeats as count + compound literal */
-                    int rcount = node->call.args.count - fn->repeats_start_idx;
-                    if (rcount < 0) rcount = 0;
-                    if (fn->repeats_start_idx > 0) fprintf(e->out, ", ");
-                    fprintf(e->out, "%d, (SigilVal[]){", rcount);
-                    for (int i = fn->repeats_start_idx; i < node->call.args.count; i++) {
-                        if (i > fn->repeats_start_idx) fprintf(e->out, ", ");
-                        emit_boxed(e, node->call.args.items[i]);
-                    }
-                    fprintf(e->out, "}");
-                } else {
-                    for (int i = 0; i < node->call.args.count; i++) {
-                        if (i > 0) fprintf(e->out, ", ");
-                        if (fn && i < fn->param_count && fn->param_mutable[i]) {
-                            fprintf(e->out, "&");
+                    fprintf(e->out, "(");
+                    if (fn && fn->has_repeats) {
+                        for (int i = 0; i < fn->repeats_start_idx && i < node->call.args.count; i++) {
+                            if (i > 0) fprintf(e->out, ", ");
+                            emit_boxed(e, node->call.args.items[i]);
                         }
-                        emit_expr(e, node->call.args.items[i]);
+                        int rcount = node->call.args.count - fn->repeats_start_idx;
+                        if (rcount < 0) rcount = 0;
+                        if (fn->repeats_start_idx > 0) fprintf(e->out, ", ");
+                        fprintf(e->out, "%d, (SigilVal[]){", rcount);
+                        for (int i = fn->repeats_start_idx; i < node->call.args.count; i++) {
+                            if (i > fn->repeats_start_idx) fprintf(e->out, ", ");
+                            emit_boxed(e, node->call.args.items[i]);
+                        }
+                        fprintf(e->out, "}");
+                    } else {
+                        for (int i = 0; i < node->call.args.count; i++) {
+                            if (i > 0) fprintf(e->out, ", ");
+                            if (fn && i < fn->param_count && fn->param_mutable[i]) {
+                                fprintf(e->out, "&");
+                            }
+                            emit_expr(e, node->call.args.items[i]);
+                        }
                     }
+                    fprintf(e->out, ")");
                 }
-                fprintf(e->out, ")");
             }
             call_done:
             break;
@@ -1478,8 +1795,15 @@ static void emit_fn_decl(CEmitter *e, ASTNode *fn) {
     e->var_params = vp;
     e->var_param_count = vpc;
 
+    bool prev_in_fn_body = e->in_fn_body;
+    const char *prev_fn_name = e->current_fn_name;
+    e->in_fn_body = true;
+    e->current_fn_name = fn->fn_decl.fn_name;
+
     emit_body(e, fn->fn_decl.body);
 
+    e->in_fn_body = prev_in_fn_body;
+    e->current_fn_name = prev_fn_name;
     e->var_params = prev_var_params;
     e->var_param_count = prev_var_param_count;
     e->indent--;
@@ -1890,8 +2214,15 @@ static void emit_mono_body(CEmitter *e, MonoInstance *m) {
     e->var_params = vp;
     e->var_param_count = vpc;
 
+    bool prev_in_fn_body = e->in_fn_body;
+    const char *prev_fn_name = e->current_fn_name;
+    e->in_fn_body = true;
+    e->current_fn_name = fn->fn_decl.fn_name;
+
     emit_body(e, fn->fn_decl.body);
 
+    e->in_fn_body = prev_in_fn_body;
+    e->current_fn_name = prev_fn_name;
     e->var_params = prev_var_params;
     e->var_param_count = prev_vpc;
     e->indent--;
@@ -2042,12 +2373,806 @@ static void collect_top_stmts(ASTNode *node, FnList *stmts) {
 
 /* ── Top-level Emission ──────────────────────────────────────────── */
 
+/* ── Thunk evaluator wrapper emission ────────────────────────────── */
+
+/* ── Evaluator body walking (graph-driven execution) ─────────────── */
+
+/* Counter for child index in evaluator body emission */
+static int eval_child_idx;
+
+/* Emit an unbox call for a given type around a SigilVal expression */
+static const char *eval_unbox_func(TypeRef *t) {
+    if (t) {
+        switch (t->kind) {
+            case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                return "sigil_unbox_int";
+            case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                return "sigil_unbox_float";
+            case TYPE_BOOL: return "sigil_unbox_bool";
+            case TYPE_CHAR: return "sigil_unbox_char";
+            case TYPE_MAP: case TYPE_NAMED: return "sigil_unbox_map";
+            case TYPE_FN: return "sigil_unbox_closure";
+            default: break;
+        }
+    }
+    return "sigil_unbox_int";
+}
+
+/* Emit an expression in evaluator context: _argN for params, inline builtins,
+   thunk_force for recursive children, direct C calls for other user fns */
+static void emit_eval_expr(CEmitter *e, ASTNode *node, const char *self_name,
+                            int param_count, const char **pnames, TypeRef *ret_type) {
+    if (!node) { fprintf(e->out, "0"); return; }
+    switch (node->kind) {
+        case NODE_INT_LIT:
+            fprintf(e->out, "%lldLL", (long long)node->int_lit.int_val);
+            return;
+        case NODE_FLOAT_LIT:
+            fprintf(e->out, "%g", node->float_lit.float_val);
+            return;
+        case NODE_BOOL_LIT:
+            fprintf(e->out, "%s", node->bool_lit.bool_val ? "true" : "false");
+            return;
+        case NODE_IDENT:
+            for (int i = 0; i < param_count; i++) {
+                if (strcmp(node->ident.ident, pnames[i]) == 0) {
+                    fprintf(e->out, "_arg%d", i);
+                    return;
+                }
+            }
+            fprintf(e->out, "%s", node->ident.ident);
+            return;
+        case NODE_CALL: {
+            /* Recursive self-call → force child from graph */
+            if (strcmp(node->call.call_name, self_name) == 0) {
+                fprintf(e->out, "%s(sigil_force_val(thunk_force(_t->children[%d], _arena), _arena))",
+                        eval_unbox_func(ret_type), eval_child_idx);
+                eval_child_idx++;
+                return;
+            }
+            /* Builtin binary op */
+            const BuiltinOp *bi = find_builtin(node->call.call_name);
+            if (bi && bi->c_op && node->call.args.count == 2) {
+                fprintf(e->out, "(");
+                emit_eval_expr(e, node->call.args.items[0], self_name, param_count, pnames, ret_type);
+                fprintf(e->out, " %s ", bi->c_op);
+                emit_eval_expr(e, node->call.args.items[1], self_name, param_count, pnames, ret_type);
+                fprintf(e->out, ")");
+                return;
+            }
+            /* Builtin unary op */
+            if (bi && bi->is_unary_prefix && node->call.args.count == 1) {
+                const char *op = strcmp(bi->name, "negate") == 0 ? "-" : "!";
+                fprintf(e->out, "(%s", op);
+                emit_eval_expr(e, node->call.args.items[0], self_name, param_count, pnames, ret_type);
+                fprintf(e->out, ")");
+                return;
+            }
+            /* Other user fn: direct C call */
+            fprintf(e->out, "sigil_%s(", node->call.call_name);
+            for (int i = 0; i < node->call.args.count; i++) {
+                if (i > 0) fprintf(e->out, ", ");
+                emit_eval_expr(e, node->call.args.items[i], self_name, param_count, pnames, ret_type);
+            }
+            fprintf(e->out, ")");
+            return;
+        }
+        case NODE_BEGIN_END: case NODE_BLOCK:
+            if (node->block.stmts.count == 1) {
+                emit_eval_expr(e, node->block.stmts.items[0], self_name, param_count, pnames, ret_type);
+            } else if (node->block.stmts.count > 0) {
+                emit_eval_expr(e, node->block.stmts.items[node->block.stmts.count - 1],
+                               self_name, param_count, pnames, ret_type);
+            } else {
+                fprintf(e->out, "0");
+            }
+            return;
+        case NODE_RETURN:
+            emit_eval_expr(e, node->ret.value, self_name, param_count, pnames, ret_type);
+            return;
+        default:
+            fprintf(e->out, "0");
+            return;
+    }
+}
+
+/* Emit an evaluator-mode condition (uses _argN instead of _aN_v) */
+static void emit_eval_cond_expr(CEmitter *e, ASTNode *node, int param_count, const char **pnames) {
+    if (!node) { fprintf(e->out, "0"); return; }
+    switch (node->kind) {
+        case NODE_INT_LIT:
+            fprintf(e->out, "%lldLL", (long long)node->int_lit.int_val);
+            return;
+        case NODE_FLOAT_LIT:
+            fprintf(e->out, "%g", node->float_lit.float_val);
+            return;
+        case NODE_BOOL_LIT:
+            fprintf(e->out, "%s", node->bool_lit.bool_val ? "1" : "0");
+            return;
+        case NODE_IDENT:
+            for (int i = 0; i < param_count; i++) {
+                if (strcmp(node->ident.ident, pnames[i]) == 0) {
+                    fprintf(e->out, "_arg%d", i);
+                    return;
+                }
+            }
+            fprintf(e->out, "0");
+            return;
+        case NODE_CALL: {
+            const BuiltinOp *bi = find_builtin(node->call.call_name);
+            if (bi && bi->c_op && node->call.args.count == 2) {
+                fprintf(e->out, "(");
+                emit_eval_cond_expr(e, node->call.args.items[0], param_count, pnames);
+                fprintf(e->out, " %s ", bi->c_op);
+                emit_eval_cond_expr(e, node->call.args.items[1], param_count, pnames);
+                fprintf(e->out, ")");
+                return;
+            }
+            if (bi && bi->is_unary_prefix && node->call.args.count == 1) {
+                const char *op = strcmp(bi->name, "not") == 0 ? "!" : "-";
+                fprintf(e->out, "(%s", op);
+                emit_eval_cond_expr(e, node->call.args.items[0], param_count, pnames);
+                fprintf(e->out, ")");
+                return;
+            }
+            fprintf(e->out, "1");
+            return;
+        }
+        default:
+            fprintf(e->out, "0");
+            return;
+    }
+}
+
+static void emit_eval_cond(CEmitter *e, ASTNode *cond, int param_count, const char **pnames) {
+    if (!cond) { fprintf(e->out, "1"); return; }
+    emit_eval_cond_expr(e, cond, param_count, pnames);
+}
+
+/* Walk if/else for evaluator */
+static void emit_eval_if(CEmitter *e, ASTNode *if_node, const char *self_name,
+                           int param_count, const char **pnames, TypeRef *ret_type);
+
+/* Emit evaluator body walking the AST */
+static void emit_eval_body_walk(CEmitter *e, ASTNode *body, const char *self_name,
+                                  int param_count, const char **pnames, TypeRef *ret_type) {
+    if (!body) return;
+    switch (body->kind) {
+        case NODE_IF:
+            emit_eval_if(e, body, self_name, param_count, pnames, ret_type);
+            break;
+        case NODE_RETURN:
+            eval_child_idx = 0;
+            fprintf(e->out, "    return ");
+            /* Emit boxed return expression */
+            if (ret_type) {
+                switch (ret_type->kind) {
+                    case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                        fprintf(e->out, "sigil_val_int("); break;
+                    case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                        fprintf(e->out, "sigil_val_float("); break;
+                    case TYPE_BOOL:
+                        fprintf(e->out, "sigil_val_bool("); break;
+                    case TYPE_CHAR:
+                        fprintf(e->out, "sigil_val_char("); break;
+                    case TYPE_MAP: case TYPE_NAMED:
+                        fprintf(e->out, "sigil_val_map("); break;
+                    default:
+                        fprintf(e->out, "sigil_val_int("); break;
+                }
+            } else {
+                fprintf(e->out, "sigil_val_int(");
+            }
+            emit_eval_expr(e, body->ret.value, self_name, param_count, pnames, ret_type);
+            fprintf(e->out, ");\n");
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < body->block.stmts.count; i++)
+                emit_eval_body_walk(e, body->block.stmts.items[i], self_name, param_count, pnames, ret_type);
+            break;
+        default:
+            break;
+    }
+}
+
+/* Emit evaluator if/else branching */
+static void emit_eval_if(CEmitter *e, ASTNode *if_node, const char *self_name,
+                           int param_count, const char **pnames, TypeRef *ret_type) {
+    fprintf(e->out, "    if (");
+    emit_eval_cond(e, if_node->if_stmt.condition, param_count, pnames);
+    fprintf(e->out, ") {\n");
+    emit_eval_body_walk(e, if_node->if_stmt.then_body, self_name, param_count, pnames, ret_type);
+    fprintf(e->out, "    }");
+    for (int i = 0; i < if_node->if_stmt.elifs.count; i += 2) {
+        fprintf(e->out, " else if (");
+        emit_eval_cond(e, if_node->if_stmt.elifs.items[i], param_count, pnames);
+        fprintf(e->out, ") {\n");
+        emit_eval_body_walk(e, if_node->if_stmt.elifs.items[i + 1], self_name, param_count, pnames, ret_type);
+        fprintf(e->out, "    }");
+    }
+    if (if_node->if_stmt.else_body) {
+        fprintf(e->out, " else {\n");
+        emit_eval_body_walk(e, if_node->if_stmt.else_body, self_name, param_count, pnames, ret_type);
+        fprintf(e->out, "    }");
+    }
+    fprintf(e->out, "\n");
+}
+
+/* Emit _eval_N function: forces child thunks, walks graph for recursive fns */
+static void emit_thunk_evaluator(CEmitter *e, int func_id, ASTNode *fn) {
+    /* Collect param info */
+    int pc = 0;
+    const char *pnames[32];
+    TypeRef *ptypes[32];
+    for (int i = 0; i < fn->fn_decl.pattern.count; i++) {
+        PatElem *pe = &fn->fn_decl.pattern.items[i];
+        if (pe->kind == PAT_PARAM && pc < 32) {
+            pnames[pc] = pe->param_name;
+            ptypes[pc] = pe->type;
+            pc++;
+        }
+    }
+
+    /* Detect if this fn is recursive */
+    int recursive = count_recursive_calls(e, fn->fn_decl.body, fn->fn_decl.fn_name);
+
+    fprintf(e->out, "static SigilVal _eval_%d(SigilThunk *_t, ThunkArena *_arena) {\n", func_id);
+    /* Force each arg thunk (sigil_force_val handles nested thunks) */
+    for (int i = 0; i < pc; i++) {
+        fprintf(e->out, "    SigilVal _arg%d_v = sigil_force_val(thunk_force(_t->args[%d], _arena), _arena);\n", i, i);
+        fprintf(e->out, "    ");
+        emit_c_type(e, ptypes[i]);
+        fprintf(e->out, " _arg%d = ", i);
+        /* Unbox based on type */
+        if (ptypes[i]) {
+            switch (ptypes[i]->kind) {
+                case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                    fprintf(e->out, "sigil_unbox_int(_arg%d_v)", i); break;
+                case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                    fprintf(e->out, "sigil_unbox_float(_arg%d_v)", i); break;
+                case TYPE_BOOL:
+                    fprintf(e->out, "sigil_unbox_bool(_arg%d_v)", i); break;
+                case TYPE_CHAR:
+                    fprintf(e->out, "sigil_unbox_char(_arg%d_v)", i); break;
+                case TYPE_MAP: case TYPE_NAMED:
+                    fprintf(e->out, "sigil_unbox_map(_arg%d_v)", i); break;
+                case TYPE_FN:
+                    fprintf(e->out, "sigil_unbox_closure(_arg%d_v)", i); break;
+                default:
+                    fprintf(e->out, "sigil_unbox_int(_arg%d_v)", i); break;
+            }
+        } else {
+            fprintf(e->out, "sigil_unbox_int(_arg%d_v)", i);
+        }
+        fprintf(e->out, ";\n");
+    }
+
+    if (recursive > 0 && fn->fn_decl.body) {
+        /* Graph-driven evaluator: walk AST, force children instead of calling C fn */
+        fprintf(e->out, "    (void)_arg0_v;\n");
+        eval_child_idx = 0;
+        emit_eval_body_walk(e, fn->fn_decl.body, fn->fn_decl.fn_name, pc, pnames, fn->fn_decl.return_type);
+        fprintf(e->out, "    return sigil_val_int(0);\n");
+    } else {
+        /* Non-recursive: call the C function directly */
+        fprintf(e->out, "    ");
+        TypeRef *ret = fn->fn_decl.return_type;
+        bool is_void = ret && ret->kind == TYPE_VOID;
+        if (!is_void) {
+            emit_c_type(e, ret);
+            fprintf(e->out, " _result = ");
+        }
+        int mpc = 0;
+        TypeRef *mptypes[32];
+        for (int i = 0; i < fn->fn_decl.pattern.count; i++) {
+            if (fn->fn_decl.pattern.items[i].kind == PAT_PARAM && mpc < 32)
+                mptypes[mpc++] = fn->fn_decl.pattern.items[i].type;
+        }
+        emit_mangled_fn_name(e, fn->fn_decl.fn_name, mpc, mptypes);
+        fprintf(e->out, "(");
+        for (int i = 0; i < pc; i++) {
+            if (i > 0) fprintf(e->out, ", ");
+            fprintf(e->out, "_arg%d", i);
+        }
+        fprintf(e->out, ");\n");
+
+        if (is_void) {
+            fprintf(e->out, "    return sigil_val_int(0);\n");
+        } else {
+            fprintf(e->out, "    return ");
+            if (ret) {
+                switch (ret->kind) {
+                    case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                        fprintf(e->out, "sigil_val_int(_result)"); break;
+                    case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                        fprintf(e->out, "sigil_val_float(_result)"); break;
+                    case TYPE_BOOL:
+                        fprintf(e->out, "sigil_val_bool(_result)"); break;
+                    case TYPE_CHAR:
+                        fprintf(e->out, "sigil_val_char(_result)"); break;
+                    case TYPE_MAP: case TYPE_NAMED:
+                        fprintf(e->out, "sigil_val_map(_result)"); break;
+                    case TYPE_FN:
+                        fprintf(e->out, "sigil_val_closure(_result)"); break;
+                    default:
+                        fprintf(e->out, "sigil_val_int(_result)"); break;
+                }
+            } else {
+                fprintf(e->out, "sigil_val_int(_result)");
+            }
+            fprintf(e->out, ";\n");
+        }
+    }
+    fprintf(e->out, "}\n\n");
+}
+
+/* ── Constructor helpers ──────────────────────────────────────────── */
+
+/* Counter for recursive child assignment in constructors */
+static int ctor_child_idx;
+
+/* Count recursive calls to self_name in an expression tree */
+static int count_recursive_calls(CEmitter *e, ASTNode *node, const char *fn_name) {
+    (void)e;
+    if (!node) return 0;
+    if (node->kind == NODE_CALL) {
+        int count = (strcmp(node->call.call_name, fn_name) == 0) ? 1 : 0;
+        for (int i = 0; i < node->call.args.count; i++)
+            count += count_recursive_calls(e, node->call.args.items[i], fn_name);
+        return count;
+    }
+    switch (node->kind) {
+        case NODE_BEGIN_END: case NODE_BLOCK:
+            { int c = 0; for (int i = 0; i < node->block.stmts.count; i++)
+                c += count_recursive_calls(e, node->block.stmts.items[i], fn_name);
+              return c; }
+        case NODE_RETURN:
+            return count_recursive_calls(e, node->ret.value, fn_name);
+        case NODE_IF:
+            { int c = count_recursive_calls(e, node->if_stmt.then_body, fn_name);
+              if (node->if_stmt.else_body) c += count_recursive_calls(e, node->if_stmt.else_body, fn_name);
+              return c; }
+        default: return 0;
+    }
+}
+
+/* Emit a completed thunk wrapping a forced arg value for constructor contexts */
+static void emit_ctor_arg_val(CEmitter *e, ASTNode *node, int param_count, const char **pnames) {
+    if (!node) {
+        fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(0))");
+        return;
+    }
+    switch (node->kind) {
+        case NODE_INT_LIT:
+            fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(%lldLL))",
+                    (long long)node->int_lit.int_val);
+            return;
+        case NODE_FLOAT_LIT:
+            fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_float(%g))",
+                    node->float_lit.float_val);
+            return;
+        case NODE_BOOL_LIT:
+            fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_bool(%s))",
+                    node->bool_lit.bool_val ? "true" : "false");
+            return;
+        case NODE_IDENT:
+            for (int i = 0; i < param_count; i++) {
+                if (strcmp(node->ident.ident, pnames[i]) == 0) {
+                    fprintf(e->out, "thunk_alloc_completed(_arena, _a%d_v)", i);
+                    return;
+                }
+            }
+            fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(0))");
+            return;
+        case NODE_CALL: {
+            /* Evaluate builtins inline on forced args */
+            const BuiltinOp *bi = find_builtin(node->call.call_name);
+            if (bi && bi->c_op && node->call.args.count == 2) {
+                fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(sigil_unbox_int(");
+                emit_ctor_expr_raw(e, node->call.args.items[0], param_count, pnames);
+                fprintf(e->out, ") %s sigil_unbox_int(", bi->c_op);
+                emit_ctor_expr_raw(e, node->call.args.items[1], param_count, pnames);
+                fprintf(e->out, ")))");
+                return;
+            }
+            if (bi && bi->is_unary_prefix && node->call.args.count == 1) {
+                const char *op = strcmp(bi->name, "negate") == 0 ? "-" : "!";
+                fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int((int64_t)(%s sigil_unbox_int(", op);
+                emit_ctor_expr_raw(e, node->call.args.items[0], param_count, pnames);
+                fprintf(e->out, "))))");
+                return;
+            }
+            fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(0))");
+            return;
+        }
+        case NODE_BEGIN_END: case NODE_BLOCK:
+            if (node->block.stmts.count > 0)
+                emit_ctor_arg_val(e, node->block.stmts.items[node->block.stmts.count - 1], param_count, pnames);
+            else
+                fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(0))");
+            return;
+        default:
+            fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(0))");
+            return;
+    }
+}
+
+/* Emit raw SigilVal expression (for inline builtin evaluation in constructors) */
+static void emit_ctor_expr_raw(CEmitter *e, ASTNode *node, int param_count, const char **pnames) {
+    (void)e;
+    if (!node) { fprintf(e->out, "sigil_val_int(0)"); return; }
+    switch (node->kind) {
+        case NODE_INT_LIT:
+            fprintf(e->out, "sigil_val_int(%lldLL)", (long long)node->int_lit.int_val);
+            return;
+        case NODE_IDENT:
+            for (int i = 0; i < param_count; i++) {
+                if (strcmp(node->ident.ident, pnames[i]) == 0) {
+                    fprintf(e->out, "_a%d_v", i);
+                    return;
+                }
+            }
+            fprintf(e->out, "sigil_val_int(0)");
+            return;
+        case NODE_CALL: {
+            const BuiltinOp *bi = find_builtin(node->call.call_name);
+            if (bi && bi->c_op && node->call.args.count == 2) {
+                fprintf(e->out, "sigil_val_int(sigil_unbox_int(");
+                emit_ctor_expr_raw(e, node->call.args.items[0], param_count, pnames);
+                fprintf(e->out, ") %s sigil_unbox_int(", bi->c_op);
+                emit_ctor_expr_raw(e, node->call.args.items[1], param_count, pnames);
+                fprintf(e->out, "))");
+                return;
+            }
+            if (bi && bi->is_unary_prefix && node->call.args.count == 1) {
+                const char *op = strcmp(bi->name, "negate") == 0 ? "-" : "!";
+                fprintf(e->out, "sigil_val_int((int64_t)(%s sigil_unbox_int(", op);
+                emit_ctor_expr_raw(e, node->call.args.items[0], param_count, pnames);
+                fprintf(e->out, ")))");
+                return;
+            }
+            fprintf(e->out, "sigil_val_int(0)");
+            return;
+        }
+        case NODE_BEGIN_END: case NODE_BLOCK:
+            if (node->block.stmts.count > 0)
+                emit_ctor_expr_raw(e, node->block.stmts.items[node->block.stmts.count - 1], param_count, pnames);
+            else
+                fprintf(e->out, "sigil_val_int(0)");
+            return;
+        default:
+            fprintf(e->out, "sigil_val_int(0)");
+            return;
+    }
+}
+
+/* Emit condition for constructor guards */
+static void emit_ctor_cond(CEmitter *e, ASTNode *cond, int param_count, const char **pnames) {
+    if (!cond) { fprintf(e->out, "1"); return; }
+    if (cond->kind == NODE_BOOL_LIT) {
+        fprintf(e->out, "%s", cond->bool_lit.bool_val ? "1" : "0");
+        return;
+    }
+    if (cond->kind == NODE_CALL) {
+        const BuiltinOp *bi = find_builtin(cond->call.call_name);
+        if (bi && bi->c_op && cond->call.args.count == 2) {
+            fprintf(e->out, "(sigil_unbox_int(");
+            emit_ctor_expr_raw(e, cond->call.args.items[0], param_count, pnames);
+            fprintf(e->out, ") %s sigil_unbox_int(", bi->c_op);
+            emit_ctor_expr_raw(e, cond->call.args.items[1], param_count, pnames);
+            fprintf(e->out, "))");
+            return;
+        }
+        if (bi && bi->is_unary_prefix && cond->call.args.count == 1) {
+            const char *op = strcmp(bi->name, "not") == 0 ? "!" : "-";
+            fprintf(e->out, "(%s sigil_unbox_int(", op);
+            emit_ctor_expr_raw(e, cond->call.args.items[0], param_count, pnames);
+            fprintf(e->out, "))");
+            return;
+        }
+    }
+    fprintf(e->out, "1");
+}
+
+/* Find the return expression in a body (unwrapping blocks) */
+static ASTNode *find_return_expr(ASTNode *body) {
+    if (!body) return NULL;
+    if (body->kind == NODE_RETURN) return body->ret.value;
+    if (body->kind == NODE_BLOCK || body->kind == NODE_BEGIN_END) {
+        for (int i = 0; i < body->block.stmts.count; i++) {
+            ASTNode *r = find_return_expr(body->block.stmts.items[i]);
+            if (r) return r;
+        }
+    }
+    return NULL;
+}
+
+/* Emit constructor body for a branch: find recursive calls and emit child thunks */
+static void emit_ctor_branch(CEmitter *e, ASTNode *body, const char *self_name, int self_id,
+                              int param_count, const char **pnames) {
+    if (!body) { fprintf(e->out, "    return NULL;\n"); return; }
+
+    /* Count recursive calls in this branch */
+    int rc = count_recursive_calls(e, body, self_name);
+
+    if (rc == 0) {
+        /* Base case: no recursive calls. Try to compute the return value inline. */
+        ASTNode *ret_expr = find_return_expr(body);
+        if (ret_expr) {
+            fprintf(e->out, "    return thunk_alloc_completed(_arena, ");
+            emit_ctor_expr_raw(e, ret_expr, param_count, pnames);
+            fprintf(e->out, ");\n");
+        } else {
+            fprintf(e->out, "    return NULL;\n");
+        }
+    } else {
+        /* Recursive case: collect recursive sub-call thunks as children */
+        fprintf(e->out, "    {\n");
+        fprintf(e->out, "    SigilThunk *_result = thunk_alloc(_arena, %d, %d);\n", self_id, rc);
+        ctor_child_idx = 0;
+        collect_recursive_thunks_to_result(e, body, self_name, self_id, param_count, pnames);
+        fprintf(e->out, "    return _result;\n");
+        fprintf(e->out, "    }\n");
+    }
+}
+
+/* Walk body and emit _result->args[idx] assignments for each recursive call found */
+static void collect_recursive_thunks_to_result(CEmitter *e, ASTNode *node, const char *self_name,
+                                                int self_id, int param_count, const char **pnames) {
+    if (!node) return;
+    switch (node->kind) {
+        case NODE_RETURN:
+            emit_recursive_child_assignments(e, node->ret.value, self_name, self_id, param_count, pnames);
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < node->block.stmts.count; i++)
+                collect_recursive_thunks_to_result(e, node->block.stmts.items[i], self_name, self_id, param_count, pnames);
+            break;
+        default:
+            emit_recursive_child_assignments(e, node, self_name, self_id, param_count, pnames);
+            break;
+    }
+}
+
+
+static void emit_recursive_child_assignments(CEmitter *e, ASTNode *node, const char *self_name,
+                                              int self_id, int param_count, const char **pnames) {
+    if (!node) return;
+    if (node->kind == NODE_CALL && strcmp(node->call.call_name, self_name) == 0) {
+        int ca = node->call.args.count;
+        fprintf(e->out, "    _result->args[%d] = ({ SigilThunk *_ct = thunk_alloc(_arena, %d, %d);",
+                ctor_child_idx, self_id, ca);
+        for (int i = 0; i < ca; i++) {
+            fprintf(e->out, " _ct->args[%d] = ", i);
+            emit_ctor_arg_val(e, node->call.args.items[i], param_count, pnames);
+            fprintf(e->out, ";");
+        }
+        fprintf(e->out, " _ct; });\n");
+        ctor_child_idx++;
+        return;
+    }
+    if (node->kind == NODE_CALL) {
+        for (int i = 0; i < node->call.args.count; i++)
+            emit_recursive_child_assignments(e, node->call.args.items[i], self_name, self_id, param_count, pnames);
+        return;
+    }
+    if (node->kind == NODE_BEGIN_END || node->kind == NODE_BLOCK) {
+        for (int i = 0; i < node->block.stmts.count; i++)
+            emit_recursive_child_assignments(e, node->block.stmts.items[i], self_name, self_id, param_count, pnames);
+    }
+}
+
+/* Walk if/else to emit constructor branching logic */
+static void emit_ctor_if(CEmitter *e, ASTNode *if_node, const char *self_name, int self_id,
+                          int param_count, const char **pnames) {
+    fprintf(e->out, "    if (");
+    emit_ctor_cond(e, if_node->if_stmt.condition, param_count, pnames);
+    fprintf(e->out, ") {\n");
+    emit_ctor_branch(e, if_node->if_stmt.then_body, self_name, self_id, param_count, pnames);
+    fprintf(e->out, "    }");
+    for (int i = 0; i < if_node->if_stmt.elifs.count; i += 2) {
+        fprintf(e->out, " else if (");
+        emit_ctor_cond(e, if_node->if_stmt.elifs.items[i], param_count, pnames);
+        fprintf(e->out, ") {\n");
+        emit_ctor_branch(e, if_node->if_stmt.elifs.items[i + 1], self_name, self_id, param_count, pnames);
+        fprintf(e->out, "    }");
+    }
+    if (if_node->if_stmt.else_body) {
+        fprintf(e->out, " else {\n");
+        emit_ctor_branch(e, if_node->if_stmt.else_body, self_name, self_id, param_count, pnames);
+        fprintf(e->out, "    }");
+    }
+    fprintf(e->out, "\n");
+}
+
+/* Walk body to find if/else or return at top level */
+static void emit_ctor_body_walk(CEmitter *e, ASTNode *body, const char *self_name, int self_id,
+                                 int param_count, const char **pnames) {
+    if (!body) return;
+    switch (body->kind) {
+        case NODE_IF:
+            emit_ctor_if(e, body, self_name, self_id, param_count, pnames);
+            break;
+        case NODE_RETURN:
+            emit_ctor_branch(e, body, self_name, self_id, param_count, pnames);
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < body->block.stmts.count; i++)
+                emit_ctor_body_walk(e, body->block.stmts.items[i], self_name, self_id, param_count, pnames);
+            break;
+        default:
+            break;
+    }
+}
+
+/* Emit _ctor_N function: real constructor that analyzes fn body */
+static void emit_thunk_constructor(CEmitter *e, int func_id, ASTNode *fn) {
+    int pc = 0;
+    const char *pnames[32];
+    TypeRef *ptypes[32];
+    for (int i = 0; i < fn->fn_decl.pattern.count; i++) {
+        PatElem *pe = &fn->fn_decl.pattern.items[i];
+        if (pe->kind == PAT_PARAM && pc < 32) {
+            pnames[pc] = pe->param_name;
+            ptypes[pc] = pe->type;
+            pc++;
+        }
+    }
+    (void)ptypes;
+
+    fprintf(e->out, "static SigilThunk* _ctor_%d(ThunkArena *_arena, SigilThunk **_args) {\n", func_id);
+
+    ASTNode *body = fn->fn_decl.body;
+    int recursive = count_recursive_calls(e, body, fn->fn_decl.fn_name);
+
+    if (recursive == 0 || !body) {
+        /* Non-recursive fn: return NULL to signal evaluator-only */
+        fprintf(e->out, "    (void)_arena; (void)_args;\n");
+        fprintf(e->out, "    return NULL;\n");
+        fprintf(e->out, "}\n\n");
+        return;
+    }
+
+    /* Force each arg to get concrete values for guard evaluation */
+    if (pc > 0) {
+        fprintf(e->out, "    if (!_args) return NULL;\n");
+    }
+    for (int i = 0; i < pc; i++) {
+        fprintf(e->out, "    SigilVal _a%d_v = _args[%d] ? sigil_force_val(thunk_force(_args[%d], _arena), _arena) : sigil_val_int(0);\n",
+                i, i, i);
+    }
+
+    /* Reset child index counter and walk body */
+    ctor_child_idx = 0;
+    emit_ctor_body_walk(e, body, fn->fn_decl.fn_name, func_id, pc, pnames);
+
+    fprintf(e->out, "    return NULL;\n");
+    fprintf(e->out, "}\n\n");
+}
+
+/* Emit mono evaluator */
+static void emit_thunk_mono_evaluator(CEmitter *e, int func_id, MonoInstance *m) {
+    ASTNode *fn = m->fn_node;
+    int pc = 0;
+    const char *pnames[32];
+    TypeRef *ptypes[32];
+
+    MonoInstance *prev = e->current_mono;
+    e->current_mono = m;
+
+    for (int i = 0; i < fn->fn_decl.pattern.count; i++) {
+        PatElem *pe = &fn->fn_decl.pattern.items[i];
+        if (pe->kind == PAT_PARAM && pc < 32) {
+            pnames[pc] = pe->param_name;
+            ptypes[pc] = pe->type;
+            pc++;
+        }
+    }
+
+    fprintf(e->out, "static SigilVal _eval_%d(SigilThunk *_t, ThunkArena *_arena) {\n", func_id);
+    for (int i = 0; i < pc; i++) {
+        fprintf(e->out, "    SigilVal _arg%d_v = sigil_force_val(thunk_force(_t->args[%d], _arena), _arena);\n", i, i);
+        fprintf(e->out, "    ");
+        emit_c_type(e, ptypes[i]);
+        fprintf(e->out, " _arg%d = ", i);
+        TypeRef *sub = mono_substitute(e, ptypes[i]);
+        TypeRef *actual = sub ? sub : ptypes[i];
+        if (actual) {
+            switch (actual->kind) {
+                case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                    fprintf(e->out, "sigil_unbox_int(_arg%d_v)", i); break;
+                case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                    fprintf(e->out, "sigil_unbox_float(_arg%d_v)", i); break;
+                case TYPE_BOOL:
+                    fprintf(e->out, "sigil_unbox_bool(_arg%d_v)", i); break;
+                case TYPE_CHAR:
+                    fprintf(e->out, "sigil_unbox_char(_arg%d_v)", i); break;
+                case TYPE_MAP: case TYPE_NAMED:
+                    fprintf(e->out, "sigil_unbox_map(_arg%d_v)", i); break;
+                case TYPE_FN:
+                    fprintf(e->out, "sigil_unbox_closure(_arg%d_v)", i); break;
+                default:
+                    fprintf(e->out, "sigil_unbox_int(_arg%d_v)", i); break;
+            }
+        } else {
+            fprintf(e->out, "sigil_unbox_int(_arg%d_v)", i);
+        }
+        fprintf(e->out, ";\n");
+    }
+
+    /* Check if recursive */
+    int recursive = count_recursive_calls(e, fn->fn_decl.body, fn->fn_decl.fn_name);
+    TypeRef *ret = fn->fn_decl.return_type;
+    TypeRef *ret_sub = mono_substitute(e, ret);
+    if (ret_sub) ret = ret_sub;
+
+    if (recursive > 0 && fn->fn_decl.body) {
+        /* Graph-driven evaluator for recursive mono fn */
+        fprintf(e->out, "    (void)_arg0_v;\n");
+        eval_child_idx = 0;
+        emit_eval_body_walk(e, fn->fn_decl.body, fn->fn_decl.fn_name, pc, pnames, ret);
+        fprintf(e->out, "    return sigil_val_int(0);\n");
+    } else {
+        /* Non-recursive: call the mono-mangled fn */
+        fprintf(e->out, "    ");
+        bool is_void = ret && ret->kind == TYPE_VOID;
+        if (!is_void) {
+            emit_c_type(e, ret);
+            fprintf(e->out, " _result = ");
+        }
+        fprintf(e->out, "sigil_%s", m->fn_name);
+        for (int i = 0; i < m->type_var_count; i++)
+            fprintf(e->out, "_%s", type_suffix(m->concrete_types[i]));
+        fprintf(e->out, "(");
+        for (int i = 0; i < pc; i++) {
+            if (i > 0) fprintf(e->out, ", ");
+            fprintf(e->out, "_arg%d", i);
+        }
+        fprintf(e->out, ");\n");
+
+        if (is_void) {
+            fprintf(e->out, "    return sigil_val_int(0);\n");
+        } else {
+            fprintf(e->out, "    return ");
+            if (ret) {
+                switch (ret->kind) {
+                    case TYPE_INT: case TYPE_INT8: case TYPE_INT16: case TYPE_INT32: case TYPE_INT64:
+                        fprintf(e->out, "sigil_val_int(_result)"); break;
+                    case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_FLOAT64:
+                        fprintf(e->out, "sigil_val_float(_result)"); break;
+                    case TYPE_BOOL:
+                        fprintf(e->out, "sigil_val_bool(_result)"); break;
+                    case TYPE_CHAR:
+                        fprintf(e->out, "sigil_val_char(_result)"); break;
+                    case TYPE_MAP: case TYPE_NAMED:
+                        fprintf(e->out, "sigil_val_map(_result)"); break;
+                    case TYPE_FN:
+                        fprintf(e->out, "sigil_val_closure(_result)"); break;
+                    default:
+                        fprintf(e->out, "sigil_val_int(_result)"); break;
+                }
+            } else {
+                fprintf(e->out, "sigil_val_int(_result)");
+            }
+            fprintf(e->out, ";\n");
+        }
+    }
+    fprintf(e->out, "}\n\n");
+
+    e->current_mono = prev;
+}
+
 void c_emit(CEmitter *e, ASTNode *node) {
     /* Header */
     fprintf(e->out, "#include <stdint.h>\n");
     fprintf(e->out, "#include <stdbool.h>\n");
     fprintf(e->out, "#include <stdio.h>\n");
-    fprintf(e->out, "#include \"sigil_runtime.h\"\n\n");
+    fprintf(e->out, "#include \"sigil_runtime.h\"\n");
+    fprintf(e->out, "#include \"sigil_thunk.h\"\n");
+    fprintf(e->out, "#include \"sigil_executor.h\"\n");
+    fprintf(e->out, "#include \"sigil_hardware.h\"\n\n");
+    fprintf(e->out, "static ThunkArena _arena;\n");
+    fprintf(e->out, "static HardwareProfile _hw;\n\n");
 
     /* Collect all function declarations */
     FnList fns = {NULL, 0, 0};
@@ -2056,8 +3181,7 @@ void c_emit(CEmitter *e, ASTNode *node) {
     /* Collect monomorphization instances */
     collect_mono_from_node(e, node, &fns);
 
-    /* Transitive: walk each mono instance's body to find inner generic calls */
-    /* Iterate until no new instances are added (fixpoint) */
+    /* Transitive mono fixpoint */
     {
         bool changed = true;
         while (changed) {
@@ -2073,24 +3197,58 @@ void c_emit(CEmitter *e, ASTNode *node) {
         }
     }
 
-    /* Pre-collect and emit lambda functions before everything else */
+    /* Assign func_ids to all user-defined fns (skip var-param fns) */
+    for (int i = 0; i < fns.count; i++) {
+        ASTNode *fn = fns.items[i];
+        if (fn->fn_decl.is_primitive) continue;
+        if (!fn->fn_decl.body) continue;
+        if (fn_is_generic(fn)) continue;
+        /* Skip var-param (mutable ref) fns — can't thunkify mutation */
+        bool has_var = false;
+        for (int j = 0; j < fn->fn_decl.pattern.count; j++) {
+            if (fn->fn_decl.pattern.items[j].kind == PAT_PARAM &&
+                fn->fn_decl.pattern.items[j].is_mutable) { has_var = true; break; }
+        }
+        if (has_var) continue;
+        int pc = 0;
+        TypeRef *ptypes[32];
+        for (int j = 0; j < fn->fn_decl.pattern.count; j++) {
+            if (fn->fn_decl.pattern.items[j].kind == PAT_PARAM && pc < 32)
+                ptypes[pc++] = fn->fn_decl.pattern.items[j].type;
+        }
+        TypeRef **pt = (TypeRef **)arena_alloc(e->arena, pc * sizeof(TypeRef *));
+        for (int j = 0; j < pc; j++) pt[j] = ptypes[j];
+        register_thunk_fn(e, fn->fn_decl.fn_name, pc, pt, false, 0, NULL);
+    }
+    /* Assign func_ids to mono instances */
+    for (MonoInstance *m = e->mono_instances; m; m = m->next) {
+        ASTNode *fn = m->fn_node;
+        int pc = 0;
+        for (int j = 0; j < fn->fn_decl.pattern.count; j++) {
+            if (fn->fn_decl.pattern.items[j].kind == PAT_PARAM) pc++;
+        }
+        TypeRef **conc = (TypeRef **)arena_alloc(e->arena, m->type_var_count * sizeof(TypeRef *));
+        for (int j = 0; j < m->type_var_count; j++) conc[j] = m->concrete_types[j];
+        register_thunk_fn(e, m->fn_name, pc, NULL, true, m->type_var_count, conc);
+    }
+
+    /* Pre-collect and emit lambda functions */
     precollect_lambdas(e, node);
     for (LambdaEntry *le = e->lambdas; le; le = le->next)
         emit_lambda_function(e, le);
 
-    /* Pass 1: prototypes */
+    /* Pass 1: prototypes for original fns */
     int proto_count = 0;
     for (int i = 0; i < fns.count; i++) {
         ASTNode *fn = fns.items[i];
         if (fn->fn_decl.is_primitive) continue;
         if (!fn->fn_decl.body && find_builtin(fn->fn_decl.fn_name)) continue;
         if (!fn->fn_decl.body) continue;
-        if (fn_is_generic(fn)) continue; /* skip generic fns — mono instances emitted instead */
+        if (fn_is_generic(fn)) continue;
         emit_fn_prototype(e, fn);
         fprintf(e->out, ";\n");
         proto_count++;
     }
-    /* Mono instance prototypes */
     for (MonoInstance *m = e->mono_instances; m; m = m->next) {
         emit_mono_prototype(e, m);
         fprintf(e->out, ";\n");
@@ -2098,26 +3256,89 @@ void c_emit(CEmitter *e, ASTNode *node) {
     }
     if (proto_count > 0) fprintf(e->out, "\n");
 
-    /* Pass 2: bodies */
+    /* Forward-declare evaluators and constructors */
+    for (int id = 0; id < e->thunk_fn_counter; id++) {
+        fprintf(e->out, "static SigilVal _eval_%d(SigilThunk *_t, ThunkArena *_arena);\n", id);
+        fprintf(e->out, "static SigilThunk* _ctor_%d(ThunkArena *_arena, SigilThunk **_args);\n", id);
+    }
+    if (e->thunk_fn_counter > 0) fprintf(e->out, "\n");
+
+    /* Dispatch tables */
+    if (e->thunk_fn_counter > 0) {
+        fprintf(e->out, "static ThunkConstructor _ctor_table[] = {");
+        for (int id = 0; id < e->thunk_fn_counter; id++) {
+            if (id > 0) fprintf(e->out, ",");
+            fprintf(e->out, " _ctor_%d", id);
+        }
+        fprintf(e->out, " };\n");
+        fprintf(e->out, "static ThunkEvaluator _eval_table[] = {");
+        for (int id = 0; id < e->thunk_fn_counter; id++) {
+            if (id > 0) fprintf(e->out, ",");
+            fprintf(e->out, " _eval_%d", id);
+        }
+        fprintf(e->out, " };\n\n");
+    }
+
+    /* Pass 2: original fn bodies */
     for (int i = 0; i < fns.count; i++) {
-        if (fn_is_generic(fns.items[i])) continue; /* skip generic fns */
+        if (fn_is_generic(fns.items[i])) continue;
         emit_fn_decl(e, fns.items[i]);
     }
-    /* Mono instance bodies */
     for (MonoInstance *m = e->mono_instances; m; m = m->next) {
         emit_mono_body(e, m);
+    }
+
+    /* Pass 3: evaluators and constructors */
+    {
+        int id = 0;
+        for (int i = 0; i < fns.count; i++) {
+            ASTNode *fn = fns.items[i];
+            if (fn->fn_decl.is_primitive) continue;
+            if (!fn->fn_decl.body) continue;
+            if (fn_is_generic(fn)) continue;
+            /* Skip var-param fns */
+            bool has_var = false;
+            for (int j = 0; j < fn->fn_decl.pattern.count; j++) {
+                if (fn->fn_decl.pattern.items[j].kind == PAT_PARAM &&
+                    fn->fn_decl.pattern.items[j].is_mutable) { has_var = true; break; }
+            }
+            if (has_var) continue;
+
+            emit_thunk_evaluator(e, id, fn);
+            emit_thunk_constructor(e, id, fn);
+            id++;
+        }
+        for (MonoInstance *m = e->mono_instances; m; m = m->next) {
+            emit_thunk_mono_evaluator(e, id, m);
+            emit_thunk_constructor(e, id, m->fn_node);
+            id++;
+        }
     }
 
     /* Collect top-level executable statements */
     FnList top_stmts = {NULL, 0, 0};
     collect_top_stmts(node, &top_stmts);
 
-    /* main() wrapper for top-level code */
+    /* main() with thunk infrastructure */
     if (top_stmts.count > 0) {
         fprintf(e->out, "int main(void) {\n");
         e->indent = 1;
+        emit_indent(e);
+        fprintf(e->out, "thunk_arena_init(&_arena, 1024 * 1024);\n");
+        emit_indent(e);
+        fprintf(e->out, "calibrate_hardware(&_hw);\n");
+        if (e->thunk_fn_counter > 0) {
+            emit_indent(e);
+            fprintf(e->out, "sigil_constructors = _ctor_table;\n");
+            emit_indent(e);
+            fprintf(e->out, "sigil_evaluators = _eval_table;\n");
+            emit_indent(e);
+            fprintf(e->out, "sigil_thunk_fn_count = %d;\n", e->thunk_fn_counter);
+        }
         for (int i = 0; i < top_stmts.count; i++)
             emit_stmt(e, top_stmts.items[i]);
+        emit_indent(e);
+        fprintf(e->out, "thunk_arena_destroy(&_arena);\n");
         fprintf(e->out, "    return 0;\n");
         fprintf(e->out, "}\n");
         e->indent = 0;

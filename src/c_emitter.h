@@ -6,6 +6,18 @@
 #include "traits.h"
 #include <stdio.h>
 
+/* Thunk function ID mapping: maps fn name + param types to a unique integer */
+typedef struct ThunkFnMap {
+    const char *fn_name;
+    int param_count;
+    TypeRef **param_types;
+    int func_id;
+    bool is_mono;           /* true if this is a mono instance */
+    int mono_type_var_count;
+    TypeRef **mono_concrete; /* concrete types for mono mangling */
+    struct ThunkFnMap *next;
+} ThunkFnMap;
+
 /* Monomorphization instance: one specialization of a generic fn */
 typedef struct MonoInstance {
     ASTNode *fn_node;            /* original generic fn AST */
@@ -40,6 +52,11 @@ typedef struct {
     MonoInstance *current_mono;   /* non-NULL when emitting a mono specialization */
     LambdaEntry *lambdas;      /* deferred lambda functions to emit */
     int lambda_counter;        /* unique ID generator for lambdas */
+    int thunk_fn_counter;      /* assigns func_ids to user-defined fns */
+    ThunkFnMap *thunk_fn_map;  /* linked list of fn → func_id mappings */
+    bool in_thunk_arg;         /* true when emitting arg to a user fn thunk (lazy mode) */
+    bool in_fn_body;           /* true when emitting inside a user fn body (direct calls, no thunks) */
+    const char *current_fn_name; /* name of the fn currently being emitted (for self-call detection) */
 } CEmitter;
 
 void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, TraitRegistry *traits, Arena *arena);
