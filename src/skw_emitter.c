@@ -93,6 +93,19 @@ void skw_emit(SkwEmitter *e, ASTNode *node) {
             }
             break;
 
+        case NODE_CHAIN:
+            /* Emit as nested binary calls for .skw output */
+            fprintf(e->out, "%s", node->chain.chain_fn_name);
+            fprintf(e->out, " ");
+            if (node->chain.chain_operands.count >= 1)
+                skw_emit(e, node->chain.chain_operands.items[0]);
+            for (int i = 1; i < node->chain.chain_operands.count; i++) {
+                /* Wrap remaining as: fn(prev, next) */
+                fprintf(e->out, " ");
+                skw_emit(e, node->chain.chain_operands.items[i]);
+            }
+            break;
+
         case NODE_CALL:
             fprintf(e->out, "%s", node->call.call_name);
             for (int i = 0; i < node->call.args.count; i++) {

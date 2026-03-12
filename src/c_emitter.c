@@ -2,6 +2,9 @@
 #include <string.h>
 #include <ctype.h>
 
+/* Forward declaration */
+static ASTNode *chain_to_calls(Arena *arena, ASTNode *node);
+
 void c_emitter_init(CEmitter *e, FILE *out, TypeChecker *tc, TraitRegistry *traits, Arena *arena) {
     e->out = out;
     e->indent = 0;
@@ -365,6 +368,8 @@ static void emit_arg_as_thunk(CEmitter *e, ASTNode *arg) {
         return;
     }
 
+    /* Fold chains before checking */
+    if (arg->kind == NODE_CHAIN) { emit_arg_as_thunk(e, chain_to_calls(e->arena, arg)); return; }
     /* If arg is a user fn call with a thunk_id, emit a PENDING thunk */
     if (arg->kind == NODE_CALL) {
         const char *cn = arg->call.call_name;
@@ -391,6 +396,29 @@ static void emit_arg_as_thunk(CEmitter *e, ASTNode *arg) {
     fprintf(e->out, "thunk_alloc_completed(&_arena, ");
     emit_boxed(e, arg);
     fprintf(e->out, ")");
+}
+
+/* ── Chain-to-call folding helper ─────────────────────────────────── */
+
+/* Left-fold a NODE_CHAIN into nested NODE_CALL nodes.
+ * The flat representation is preserved in the AST for future optimization;
+ * this helper produces a temporary folded view for emission. */
+static ASTNode *chain_to_calls(Arena *arena, ASTNode *node) {
+    if (!node || node->kind != NODE_CHAIN) return node;
+    int n = node->chain.chain_operands.count;
+    if (n == 0) return NULL;
+    if (n == 1) return node->chain.chain_operands.items[0];
+    ASTNode *acc = node->chain.chain_operands.items[0];
+    for (int i = 1; i < n; i++) {
+        ASTNode *call = ast_new(arena, NODE_CALL, node->loc);
+        call->call.call_name = node->chain.chain_fn_name;
+        da_init(&call->call.args);
+        da_push(&call->call.args, acc);
+        da_push(&call->call.args, node->chain.chain_operands.items[i]);
+        call->resolved_type = node->resolved_type;
+        acc = call;
+    }
+    return acc;
 }
 
 /* ── Type inference for expressions (uses TypeChecker env) ───────── */
@@ -479,6 +507,15 @@ static TypeRef *infer_expr_type(CEmitter *e, ASTNode *node) {
             if (strcmp(fn->name, cn) == 0)
                 return fn->return_type;
         }
+    }
+    if (node->kind == NODE_CHAIN) {
+        /* Return type of the chain = return type of the binary fn */
+        const char *cn = node->chain.chain_fn_name;
+        for (FnEntry *fn = e->tc->fn_registry; fn; fn = fn->next) {
+            if (strcmp(fn->name, cn) == 0)
+                return fn->return_type;
+        }
+        return make_type(e->arena, TYPE_UNKNOWN);
     }
     if (node->kind == NODE_BEGIN_END && node->block.stmts.count > 0) {
         /* Type of begin/end is the type of the last statement */
@@ -572,6 +609,10 @@ static void collect_free_vars(CEmitter *e, ASTNode *node, const char **bound, in
         case NODE_CALL:
             for (int i = 0; i < node->call.args.count; i++)
                 collect_free_vars(e, node->call.args.items[i], bound, bound_count, caps);
+            break;
+        case NODE_CHAIN:
+            for (int i = 0; i < node->chain.chain_operands.count; i++)
+                collect_free_vars(e, node->chain.chain_operands.items[i], bound, bound_count, caps);
             break;
         case NODE_BLOCK: case NODE_BEGIN_END:
             for (int i = 0; i < node->block.stmts.count; i++)
@@ -727,6 +768,10 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
             } else {
                 fprintf(e->out, "%s", node->ident.ident);
             }
+            break;
+
+        case NODE_CHAIN:
+            emit_expr(e, chain_to_calls(e->arena, node));
             break;
 
         case NODE_CALL: {
@@ -1689,6 +1734,7 @@ static void emit_stmt(CEmitter *e, ASTNode *node) {
             break;
 
         case NODE_CALL:
+        case NODE_CHAIN:
             emit_indent(e);
             emit_expr(e, node);
             fprintf(e->out, ";\n");
@@ -1940,6 +1986,10 @@ static void collect_mono_from_children(CEmitter *e, ASTNode *node, FnList *fns) 
             for (int i = 0; i < node->call.args.count; i++)
                 collect_mono_from_node(e, node->call.args.items[i], fns);
             break;
+        case NODE_CHAIN:
+            for (int i = 0; i < node->chain.chain_operands.count; i++)
+                collect_mono_from_node(e, node->chain.chain_operands.items[i], fns);
+            break;
         case NODE_BLOCK: case NODE_BEGIN_END:
             for (int i = 0; i < node->block.stmts.count; i++)
                 collect_mono_from_node(e, node->block.stmts.items[i], fns);
@@ -2094,6 +2144,11 @@ static void collect_transitive_mono(CEmitter *e, ASTNode *node, FnList *fns,
         /* Recurse into args */
         for (int i = 0; i < node->call.args.count; i++)
             collect_transitive_mono(e, node->call.args.items[i], fns, outer);
+        return;
+    }
+    if (node->kind == NODE_CHAIN) {
+        for (int i = 0; i < node->chain.chain_operands.count; i++)
+            collect_transitive_mono(e, node->chain.chain_operands.items[i], fns, outer);
         return;
     }
     /* Recurse into children */
@@ -2291,6 +2346,10 @@ static void precollect_lambdas(CEmitter *e, ASTNode *node) {
             for (int i = 0; i < node->call.args.count; i++)
                 precollect_lambdas(e, node->call.args.items[i]);
             break;
+        case NODE_CHAIN:
+            for (int i = 0; i < node->chain.chain_operands.count; i++)
+                precollect_lambdas(e, node->chain.chain_operands.items[i]);
+            break;
         case NODE_IF:
             precollect_lambdas(e, node->if_stmt.condition);
             precollect_lambdas(e, node->if_stmt.then_body);
@@ -2336,7 +2395,7 @@ static bool is_executable_stmt(ASTNode *node) {
         case NODE_LET: case NODE_VAR: case NODE_ASSIGN: case NODE_RETURN:
         case NODE_BREAK: case NODE_CONTINUE:
         case NODE_IF: case NODE_WHILE: case NODE_FOR: case NODE_MATCH:
-        case NODE_CALL: case NODE_IDENT: case NODE_INT_LIT:
+        case NODE_CALL: case NODE_CHAIN: case NODE_IDENT: case NODE_INT_LIT:
         case NODE_FLOAT_LIT: case NODE_BOOL_LIT: case NODE_STRING_LIT:
         case NODE_BEGIN_END: case NODE_BLOCK:
         case NODE_LAMBDA: case NODE_COMPREHENSION:
@@ -2403,6 +2462,7 @@ static const char *eval_unbox_func(TypeRef *t) {
 static void emit_eval_expr(CEmitter *e, ASTNode *node, const char *self_name,
                             int param_count, const char **pnames, TypeRef *ret_type) {
     if (!node) { fprintf(e->out, "0"); return; }
+    if (node->kind == NODE_CHAIN) { emit_eval_expr(e, chain_to_calls(e->arena, node), self_name, param_count, pnames, ret_type); return; }
     switch (node->kind) {
         case NODE_INT_LIT:
             fprintf(e->out, "%lldLL", (long long)node->int_lit.int_val);
@@ -2479,6 +2539,7 @@ static void emit_eval_expr(CEmitter *e, ASTNode *node, const char *self_name,
 /* Emit an evaluator-mode condition (uses _argN instead of _aN_v) */
 static void emit_eval_cond_expr(CEmitter *e, ASTNode *node, int param_count, const char **pnames) {
     if (!node) { fprintf(e->out, "0"); return; }
+    if (node->kind == NODE_CHAIN) { emit_eval_cond_expr(e, chain_to_calls(e->arena, node), param_count, pnames); return; }
     switch (node->kind) {
         case NODE_INT_LIT:
             fprintf(e->out, "%lldLL", (long long)node->int_lit.int_val);
@@ -2715,6 +2776,7 @@ static int ctor_child_idx;
 static int count_recursive_calls(CEmitter *e, ASTNode *node, const char *fn_name) {
     (void)e;
     if (!node) return 0;
+    if (node->kind == NODE_CHAIN) return count_recursive_calls(e, chain_to_calls(e->arena, node), fn_name);
     if (node->kind == NODE_CALL) {
         int count = (strcmp(node->call.call_name, fn_name) == 0) ? 1 : 0;
         for (int i = 0; i < node->call.args.count; i++)
@@ -2738,6 +2800,7 @@ static int count_recursive_calls(CEmitter *e, ASTNode *node, const char *fn_name
 
 /* Emit a completed thunk wrapping a forced arg value for constructor contexts */
 static void emit_ctor_arg_val(CEmitter *e, ASTNode *node, int param_count, const char **pnames) {
+    if (node && node->kind == NODE_CHAIN) { emit_ctor_arg_val(e, chain_to_calls(e->arena, node), param_count, pnames); return; }
     if (!node) {
         fprintf(e->out, "thunk_alloc_completed(_arena, sigil_val_int(0))");
         return;
@@ -2799,6 +2862,7 @@ static void emit_ctor_arg_val(CEmitter *e, ASTNode *node, int param_count, const
 
 /* Emit raw SigilVal expression (for inline builtin evaluation in constructors) */
 static void emit_ctor_expr_raw(CEmitter *e, ASTNode *node, int param_count, const char **pnames) {
+    if (node && node->kind == NODE_CHAIN) { emit_ctor_expr_raw(e, chain_to_calls(e->arena, node), param_count, pnames); return; }
     (void)e;
     if (!node) { fprintf(e->out, "sigil_val_int(0)"); return; }
     switch (node->kind) {
@@ -2849,6 +2913,7 @@ static void emit_ctor_expr_raw(CEmitter *e, ASTNode *node, int param_count, cons
 /* Emit condition for constructor guards */
 static void emit_ctor_cond(CEmitter *e, ASTNode *cond, int param_count, const char **pnames) {
     if (!cond) { fprintf(e->out, "1"); return; }
+    if (cond->kind == NODE_CHAIN) { emit_ctor_cond(e, chain_to_calls(e->arena, cond), param_count, pnames); return; }
     if (cond->kind == NODE_BOOL_LIT) {
         fprintf(e->out, "%s", cond->bool_lit.bool_val ? "1" : "0");
         return;
@@ -2938,6 +3003,7 @@ static void collect_recursive_thunks_to_result(CEmitter *e, ASTNode *node, const
 static void emit_recursive_child_assignments(CEmitter *e, ASTNode *node, const char *self_name,
                                               int self_id, int param_count, const char **pnames) {
     if (!node) return;
+    if (node->kind == NODE_CHAIN) { emit_recursive_child_assignments(e, chain_to_calls(e->arena, node), self_name, self_id, param_count, pnames); return; }
     if (node->kind == NODE_CALL && strcmp(node->call.call_name, self_name) == 0) {
         int ca = node->call.args.count;
         fprintf(e->out, "    _result->args[%d] = ({ SigilThunk *_ct = thunk_alloc(_arena, %d, %d);",

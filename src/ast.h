@@ -36,6 +36,7 @@ typedef enum {
     /* Expressions */
     NODE_CALL,         /* keyword-prefix function call */
     NODE_SIGIL_EXPR,   /* sigil expression (pre-desugar) */
+    NODE_CHAIN,        /* flat n-ary associative chain (post-desugar) */
     NODE_BEGIN_END,    /* begin/end group */
     NODE_IDENT,
     NODE_INT_LIT,
@@ -234,6 +235,12 @@ struct ASTNode {
             NodeList operands;
             Fixity expr_fixity;
         } sigil_expr;
+
+        /* NODE_CHAIN */
+        struct {
+            const char *chain_fn_name;  /* the associative function name */
+            NodeList chain_operands;    /* flat list of operands (3+) */
+        } chain;
 
         /* NODE_BEGIN_END / NODE_BLOCK */
         struct {

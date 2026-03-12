@@ -518,6 +518,26 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
             node->resolved_type = result_type;
             return result_type;
 
+        case NODE_CHAIN: {
+            /* Type check all operands; result type = type of first binary call */
+            for (int i = 0; i < node->chain.chain_operands.count; i++)
+                check_node(tc, node->chain.chain_operands.items[i], env);
+            /* Build a synthetic NODE_CALL with first two operands to get return type */
+            ASTNode tmp;
+            tmp.kind = NODE_CALL;
+            tmp.loc = node->loc;
+            tmp.resolved_type = NULL;
+            tmp.call.call_name = node->chain.chain_fn_name;
+            da_init(&tmp.call.args);
+            if (node->chain.chain_operands.count >= 2) {
+                da_push(&tmp.call.args, node->chain.chain_operands.items[0]);
+                da_push(&tmp.call.args, node->chain.chain_operands.items[1]);
+            }
+            result_type = check_call(tc, &tmp, env);
+            node->resolved_type = result_type;
+            return result_type;
+        }
+
         case NODE_LET:
         case NODE_VAR: {
             TypeRef *val_type = check_node(tc, node->binding.value, env);

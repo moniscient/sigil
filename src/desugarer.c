@@ -21,6 +21,10 @@ static bool has_sigils(ASTNode *node) {
         for (int i = 0; i < node->call.args.count; i++)
             if (has_sigils(node->call.args.items[i])) return true;
     }
+    if (node->kind == NODE_CHAIN) {
+        for (int i = 0; i < node->chain.chain_operands.count; i++)
+            if (has_sigils(node->chain.chain_operands.items[i])) return true;
+    }
     if (node->kind == NODE_BLOCK || node->kind == NODE_BEGIN_END) {
         for (int i = 0; i < node->block.stmts.count; i++)
             if (has_sigils(node->block.stmts.items[i])) return true;
@@ -587,9 +591,35 @@ static ASTNode *expr_parse_prec(ExprParser *ep, int min_prec) {
                     TraitImpl *left_g = trait_find_impl(ep->d->trait_reg, "LeftGrouped", type_name);
                     TraitImpl *right_g = trait_find_impl(ep->d->trait_reg, "RightGrouped", type_name);
 
-                    if (right_g && !assoc && !left_g) {
+                    if (assoc && !left_g && !right_g) {
+                        /* Associative: collect into flat NODE_CHAIN */
+                        ASTNode *right = expr_parse_prec(ep, prec + 1);
+                        ASTNode *chain = ast_new(ep->d->arena, NODE_CHAIN, loc);
+                        chain->chain.chain_fn_name = b->fn_name;
+                        da_init(&chain->chain.chain_operands);
+                        /* Flatten left if it's already a chain of the same op */
+                        if (left->kind == NODE_CHAIN &&
+                            left->chain.chain_fn_name == b->fn_name) {
+                            for (int ci = 0; ci < left->chain.chain_operands.count; ci++)
+                                da_push(&chain->chain.chain_operands,
+                                        left->chain.chain_operands.items[ci]);
+                        } else {
+                            da_push(&chain->chain.chain_operands, left);
+                        }
+                        /* Flatten right if it's also a chain of the same op */
+                        if (right && right->kind == NODE_CHAIN &&
+                            right->chain.chain_fn_name == b->fn_name) {
+                            for (int ci = 0; ci < right->chain.chain_operands.count; ci++)
+                                da_push(&chain->chain.chain_operands,
+                                        right->chain.chain_operands.items[ci]);
+                        } else if (right) {
+                            da_push(&chain->chain.chain_operands, right);
+                        }
+                        left = chain;
+                        continue;
+                    } else if (right_g && !left_g) {
                         next_min_prec = prec; /* right-associative */
-                    } else if (!assoc && !left_g && !right_g) {
+                    } else if (!left_g && !right_g) {
                         /* No grouping trait: check if actually chaining */
                         Token *peek = ep_cur(ep);
                         if (peek && peek->kind == TOK_SIGIL && peek->text == op_sigil) {
@@ -597,7 +627,7 @@ static ASTNode *expr_parse_prec(ExprParser *ep, int min_prec) {
                              * but emit warning — disambiguation needed */
                         }
                     }
-                    /* Associative or LeftGrouped: keep left-associative (prec + 1) */
+                    /* LeftGrouped or default: keep left-associative (prec + 1) */
                 }
             }
         }
@@ -1005,6 +1035,10 @@ static ASTNode *desugar_node(Desugarer *d, ASTNode *node) {
 
         case NODE_CALL:
             desugar_node_list(d, &node->call.args);
+            break;
+
+        case NODE_CHAIN:
+            desugar_node_list(d, &node->chain.chain_operands);
             break;
 
         case NODE_SIGIL_EXPR: {

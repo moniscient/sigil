@@ -119,6 +119,11 @@ static void resolve_node(Resolver *r, ASTNode *node, AlgebraEntry *alg) {
             resolve_node(r, node->fn_decl.body, alg);
             break;
 
+        case NODE_CHAIN:
+            for (int i = 0; i < node->chain.chain_operands.count; i++)
+                resolve_node(r, node->chain.chain_operands.items[i], alg);
+            break;
+
         case NODE_CALL:
             for (int i = 0; i < node->call.args.count; i++)
                 resolve_node(r, node->call.args.items[i], alg);
