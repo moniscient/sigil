@@ -129,6 +129,11 @@ void type_checker_init(TypeChecker *tc, Arena *arena, InternTable *intern_tab, E
     tc->fn_registry = NULL;
     tc->current_fn_return_type = NULL;
     tc->type_registry = NULL;
+    tc->trait_registry = NULL;
+}
+
+void type_checker_set_trait_registry(TypeChecker *tc, TraitRegistry *tr) {
+    tc->trait_registry = tr;
 }
 
 TypeEnv *type_env_push(TypeEnv *parent) {
@@ -287,6 +292,22 @@ static TypeRef *get_map_type(TypeChecker *tc __attribute__((unused)), ASTNode *n
     return NULL;
 }
 
+/*
+ * Trait-bound verification trace:
+ *
+ * Given: fn foo TraitBound T x returns T
+ *   - FnEntry has param_types[0]->kind == TYPE_TRAIT_BOUND,
+ *     param_types[0]->trait_name == "TraitBound", param_types[0]->name == "T"
+ *
+ * Call: foo someVal  (where someVal has concrete type "MyType")
+ *   - arg_types[0] = check_node(someVal) → resolved_type with kind TYPE_NAMED, name "MyType"
+ *   - find_fn(tc, "foo") returns the FnEntry
+ *   - Loop over params: i=0, param_types[0]->kind == TYPE_TRAIT_BOUND
+ *   - trait_name = "TraitBound", arg type = TYPE_NAMED with name "MyType"
+ *   - tc->trait_registry non-NULL → call trait_type_has_trait(tr, "MyType", "TraitBound")
+ *   - If returns false → error_add(ERR_TRAIT, "argument 1 to 'foo': type 'MyType' does not implement trait 'TraitBound'")
+ *   - Then proceeds to unify_generic_return as before
+ */
 static TypeRef *check_call(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
     const char *name = node->call.call_name;
     int argc = node->call.args.count;
@@ -468,6 +489,40 @@ static TypeRef *check_call(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
     /* Look up fn in registry */
     FnEntry *fn = find_fn(tc, name);
     if (fn) {
+        /* Verify trait bounds on parameters */
+        if (tc->trait_registry) {
+            int check_count = fn->param_count < argc ? fn->param_count : argc;
+            for (int i = 0; i < check_count; i++) {
+                if (!fn->param_types[i] || fn->param_types[i]->kind != TYPE_TRAIT_BOUND)
+                    continue;
+                if (!arg_types[i]) continue;
+                /* Only check when the concrete type is fully known */
+                if (arg_types[i]->kind == TYPE_UNKNOWN ||
+                    arg_types[i]->kind == TYPE_GENERIC ||
+                    arg_types[i]->kind == TYPE_TRAIT_BOUND)
+                    continue;
+                const char *concrete_name = NULL;
+                if (arg_types[i]->kind == TYPE_NAMED)
+                    concrete_name = arg_types[i]->name;
+                else if (arg_types[i]->kind == TYPE_INT)
+                    concrete_name = "int";
+                else if (arg_types[i]->kind == TYPE_FLOAT)
+                    concrete_name = "float";
+                else if (arg_types[i]->kind == TYPE_BOOL)
+                    concrete_name = "bool";
+                else if (arg_types[i]->kind == TYPE_CHAR)
+                    concrete_name = "char";
+                else if (arg_types[i]->kind == TYPE_MAP)
+                    concrete_name = "map";
+                if (concrete_name &&
+                    !trait_type_has_trait(tc->trait_registry, concrete_name,
+                                         fn->param_types[i]->trait_name)) {
+                    error_add(tc->errors, ERR_TRAIT, node->loc,
+                             "argument %d to '%s': type '%s' does not implement trait '%s'",
+                             i + 1, name, concrete_name, fn->param_types[i]->trait_name);
+                }
+            }
+        }
         /* Unify generic type variables and return resolved return type */
         return unify_generic_return(tc->arena, fn->param_count, fn->param_types,
                                     arg_types, fn->return_type);
@@ -533,6 +588,8 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
                 da_push(&tmp.call.args, node->chain.chain_operands.items[0]);
                 da_push(&tmp.call.args, node->chain.chain_operands.items[1]);
             }
+            /* check_call now handles trait-bound verification internally,
+             * so no additional trait checking is needed here for NODE_CHAIN. */
             result_type = check_call(tc, &tmp, env);
             node->resolved_type = result_type;
             return result_type;

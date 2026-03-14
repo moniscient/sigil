@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "errors.h"
+#include "traits.h"
 
 /* ── Type Environment ────────────────────────────────────────────── */
 
@@ -50,6 +51,7 @@ typedef struct {
     FnEntry *fn_registry;    /* linked list of known fn declarations */
     TypeRef *current_fn_return_type; /* return type of the fn currently being checked */
     TypeDef *type_registry;  /* linked list of user-defined types */
+    TraitRegistry *trait_registry;  /* may be NULL if traits not yet registered */
 } TypeChecker;
 
 void type_checker_init(TypeChecker *tc, Arena *arena, InternTable *intern_tab, ErrorList *errors);
@@ -89,6 +91,9 @@ TypeEnv *type_env_push(TypeEnv *parent);
  * determine the concrete type for each type variable. Returns the resolved return type. */
 TypeRef *unify_generic_return(Arena *arena, int param_count, TypeRef **param_types,
                               TypeRef **arg_types, TypeRef *return_type);
+
+/* Connect a trait registry to the type checker (two-phase init). */
+void type_checker_set_trait_registry(TypeChecker *tc, TraitRegistry *tr);
 
 /* Look up a user-defined type by name. */
 TypeDef *type_def_lookup(TypeChecker *tc, const char *name);
