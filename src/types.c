@@ -574,6 +574,11 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
         }
 
         case NODE_CALL:
+            /* Purity enforcement: I/O operations forbidden in pure algebras */
+            if (tc->in_pure_algebra && strcmp(node->call.call_name, "print") == 0) {
+                error_add(tc->errors, ERR_TYPE, node->loc,
+                         "I/O operation 'print' not allowed in pure algebra");
+            }
             result_type = check_call(tc, node, env);
             node->resolved_type = result_type;
             return result_type;
@@ -750,10 +755,23 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
         case NODE_ALGEBRA:
         case NODE_LIBRARY: {
             TypeEnv *alg_env = type_env_push(env);
+            bool saved_pure = tc->in_pure_algebra;
+            tc->in_pure_algebra = node->algebra.is_pure;
             for (int i = 0; i < node->algebra.declarations.count; i++)
                 check_node(tc, node->algebra.declarations.items[i], alg_env);
+            tc->in_pure_algebra = saved_pure;
             return make_type(tc->arena, TYPE_VOID);
         }
+
+        case NODE_PURE:
+        case NODE_DISTRIBUTIVE:
+        case NODE_REQUIRES_IDENTITY:
+            return make_type(tc->arena, TYPE_VOID);
+
+        case NODE_IDENTITY:
+            if (node->identity.identity_value)
+                check_node(tc, node->identity.identity_value, env);
+            return make_type(tc->arena, TYPE_VOID);
 
         case NODE_USE:
             return check_node(tc, node->use_block.body, env);
@@ -793,6 +811,18 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
             return make_type(tc->arena, TYPE_VOID);
 
         case NODE_IMPORT:
+            /* Purity enforcement: pure algebra cannot import impure algebras */
+            if (tc->in_pure_algebra) {
+                for (int i = 0; i < node->import_decl.declarations.count; i++) {
+                    ASTNode *d = node->import_decl.declarations.items[i];
+                    if ((d->kind == NODE_ALGEBRA || d->kind == NODE_LIBRARY) &&
+                        !d->algebra.is_pure) {
+                        error_add(tc->errors, ERR_TYPE, node->loc,
+                                 "pure algebra cannot import impure algebra '%s'",
+                                 d->algebra.algebra_name);
+                    }
+                }
+            }
             for (int i = 0; i < node->import_decl.declarations.count; i++)
                 check_node(tc, node->import_decl.declarations.items[i], env);
             return make_type(tc->arena, TYPE_VOID);

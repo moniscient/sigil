@@ -1,0 +1,193 @@
+rem ── Max-Plus Algebra (Tropical Semiring) ────────────────────────
+rem
+rem In the max-plus algebra the two fundamental operations are:
+rem   "addition"       ⊕  =  max(a, b)
+rem   "multiplication"  ⊗  =  a + b   (ordinary addition)
+rem
+rem Identity elements:
+rem   ⊕ identity (zero) = -∞  (represented as -999999999)
+rem   ⊗ identity (one)  =  0
+rem
+rem Properties preserved:
+rem   ⊕ is associative, commutative, idempotent
+rem   ⊗ is associative, commutative
+rem   ⊗ distributes over ⊕:  a ⊗ (b ⊕ c) = (a ⊗ b) ⊕ (a ⊗ c)
+rem
+rem Used in shortest-path / longest-path problems, scheduling theory,
+rem discrete event systems, and tropical geometry.
+
+algebra MaxPlus
+
+pure
+
+rem ── Algebraic type declaration ─────────────────────────────────
+
+type Tropical int
+
+distributive multiply over add
+
+rem ── Export layout ──────────────────────────────────────────────
+
+export required Addable for Tropical
+export required Multipliable for Tropical
+export required Comparable for Tropical
+export optional Idempotent for Tropical
+
+rem ── Traits ─────────────────────────────────────────────────────
+
+trait Addable T begin
+  fn add T a T b returns T
+  requires identity add
+end
+
+trait Multipliable T begin
+  fn multiply T a T b returns T
+  requires identity multiply
+end
+
+trait Comparable T begin
+  fn equal T a T b returns bool
+  fn less T a T b returns bool
+  fn greater T a T b returns bool
+end
+
+trait Associative T begin
+  fn add T a T b returns T
+end
+
+trait Idempotent T begin
+  fn add T a T b returns T
+end
+
+rem ── Implementations ────────────────────────────────────────────
+
+implement Addable for int begin
+  fn add int a int b returns int begin
+    if greater a b begin
+      return a
+    end
+    return b
+  end
+  identity add do negate 999999999 end
+end
+
+implement Multipliable for int begin
+  fn multiply int a int b returns int begin
+    return do add a b end
+  end
+  identity multiply 0
+end
+
+implement Comparable for int begin
+  fn equal int a int b returns bool
+  fn less int a int b returns bool
+  fn greater int a int b returns bool
+end
+
+implement Associative for int begin
+  fn add int a int b returns int begin
+    if greater a b begin
+      return a
+    end
+    return b
+  end
+end
+
+implement Idempotent for int begin
+  fn add int a int b returns int begin
+    if greater a b begin
+      return a
+    end
+    return b
+  end
+end
+
+rem ── Sigil bindings ─────────────────────────────────────────────
+
+rem Tropical addition: max
+fn add int a + int b returns int begin
+  if greater a b begin
+    return a
+  end
+  return b
+end
+
+rem Tropical multiplication: ordinary sum
+fn multiply int a * int b returns int begin
+  return do add a b end
+end
+
+rem Tropical power: repeated ordinary addition = scalar multiply
+fn power int a ^ int n returns int begin
+  return do multiply a n end
+end
+
+rem Comparison
+fn equal int a == int b returns bool
+fn less int a < int b returns bool
+fn greater int a > int b returns bool
+
+rem ── Constants ──────────────────────────────────────────────────
+
+rem Tropical zero (additive identity): -infinity
+rem Represented as a sufficiently negative sentinel value.
+fn tropical_zero returns int begin
+  return do negate 999999999 end
+end
+
+rem Tropical one (multiplicative identity): 0
+fn tropical_one returns int begin
+  return 0
+end
+
+rem ── Derived operations ─────────────────────────────────────────
+
+rem Tropical matrix-vector "multiply":
+rem   result[i] = max_j ( A[i][j] + v[j] )
+rem This is the core operation for longest-path / scheduling.
+fn tropical_matvec map a map v returns map begin
+  let rows do length a end
+  var result mapnew
+  for i in range 0 rows begin
+    var best do negate 999999999 end
+    let row_i do get a i end
+    let cols do length row_i end
+    for j in range 0 cols begin
+      let candidate do add do get row_i j end do get v j end end
+      if greater candidate best begin
+        assign best candidate
+      end
+    end
+    set result i best
+  end
+  return result
+end
+
+rem Kleene star approximation: iterate A^0 + A^1 + ... + A^(n-1)
+rem where + is tropical add (max) and * is tropical multiply (sum).
+rem Computes all-pairs longest paths in n iterations.
+fn tropical_closure map a int n returns map begin
+  let size do length a end
+  var dist do clone a end
+  for k in range 0 n begin
+    for i in range 0 size begin
+      for j in range 0 size begin
+        let through do add do get do get dist i end k end do get do get dist k end j end end
+        let current do get do get dist i end j end
+        if greater through current begin
+          set do get dist i end j through
+        end
+      end
+    end
+  end
+  return dist
+end
+
+rem ── Aliases ────────────────────────────────────────────────────
+
+alias ( do
+alias ) end
+
+rem ── Precedence: low to high ────────────────────────────────────
+
+precedence == < > + * ^

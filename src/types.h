@@ -54,6 +54,7 @@ typedef struct {
     TypeDef *type_registry;  /* linked list of user-defined types */
     TraitRegistry *trait_registry;  /* may be NULL if traits not yet registered */
     AlgebraRegistry *algebra_registry;  /* may be NULL if algebras not yet registered */
+    bool in_pure_algebra;          /* true when checking inside a pure algebra */
 } TypeChecker;
 
 void type_checker_init(TypeChecker *tc, Arena *arena, InternTable *intern_tab, ErrorList *errors);

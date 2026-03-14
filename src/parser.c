@@ -538,19 +538,48 @@ static ASTNode *parse_trait_decl(Parser *p) {
     /* Parse requires clauses */
     while (at_text(p, "requires")) {
         eat(p);
-        const char *req_trait = cur(p)->text;
-        eat(p);
-        /* skip type var after requires */
-        if (!at_eof(p) && cur(p)->kind == TOK_IDENT) eat(p);
-        da_push(&n->trait_decl.requires, req_trait);
+        if (at_text(p, "identity")) {
+            /* requires identity fn_name */
+            eat(p); /* identity */
+            ASTNode *ri = ast_new(p->arena, NODE_REQUIRES_IDENTITY, cur(p)->loc);
+            ri->requires_identity.req_identity_fn = cur(p)->text;
+            eat(p); /* fn name */
+            da_push(&n->trait_decl.methods, ri);
+        } else {
+            const char *req_trait = cur(p)->text;
+            eat(p);
+            /* skip type var after requires */
+            if (!at_eof(p) && cur(p)->kind == TOK_IDENT) eat(p);
+            da_push(&n->trait_decl.requires, req_trait);
+        }
     }
 
     /* Parse method signatures: require begin/end block */
     if (at(p, TOK_BEGIN)) {
         eat(p); /* begin */
-        while (!at_eof(p) && !at(p, TOK_END) && at_text(p, "fn")) {
-            ASTNode *method = parse_fn_decl(p);
-            da_push(&n->trait_decl.methods, method);
+        while (!at_eof(p) && !at(p, TOK_END)) {
+            skip_newlines(p);
+            if (at(p, TOK_END)) break;
+            if (at_text(p, "fn")) {
+                ASTNode *method = parse_fn_decl(p);
+                da_push(&n->trait_decl.methods, method);
+            } else if (at_text(p, "requires")) {
+                eat(p);
+                if (at_text(p, "identity")) {
+                    eat(p); /* identity */
+                    ASTNode *ri = ast_new(p->arena, NODE_REQUIRES_IDENTITY, cur(p)->loc);
+                    ri->requires_identity.req_identity_fn = cur(p)->text;
+                    eat(p); /* fn name */
+                    da_push(&n->trait_decl.methods, ri);
+                } else {
+                    const char *req_trait = cur(p)->text;
+                    eat(p);
+                    if (!at_eof(p) && cur(p)->kind == TOK_IDENT) eat(p);
+                    da_push(&n->trait_decl.requires, req_trait);
+                }
+            } else {
+                break;
+            }
         }
         if (at(p, TOK_END)) eat(p); /* end */
     } else {
@@ -578,12 +607,26 @@ static ASTNode *parse_implement(Parser *p) {
 
     da_init(&n->implement.methods);
 
-    /* Parse methods: require begin/end block */
+    /* Parse methods and identity declarations: require begin/end block */
     if (at(p, TOK_BEGIN)) {
         eat(p); /* begin */
-        while (!at_eof(p) && !at(p, TOK_END) && at_text(p, "fn")) {
-            ASTNode *method = parse_fn_decl(p);
-            da_push(&n->implement.methods, method);
+        while (!at_eof(p) && !at(p, TOK_END)) {
+            skip_newlines(p);
+            if (at(p, TOK_END)) break;
+            if (at_text(p, "fn")) {
+                ASTNode *method = parse_fn_decl(p);
+                da_push(&n->implement.methods, method);
+            } else if (at_text(p, "identity")) {
+                SrcLoc iloc = cur(p)->loc;
+                eat(p); /* identity */
+                ASTNode *id = ast_new(p->arena, NODE_IDENTITY, iloc);
+                id->identity.identity_fn_name = cur(p)->text;
+                eat(p); /* fn name */
+                id->identity.identity_value = parse_statement(p);
+                da_push(&n->implement.methods, id);
+            } else {
+                break;
+            }
         }
         if (at(p, TOK_END)) eat(p); /* end */
     } else {
@@ -645,7 +688,9 @@ static bool is_decl_node(NodeKind kind) {
            kind == NODE_IMPLEMENT || kind == NODE_ALGEBRA ||
            kind == NODE_LIBRARY || kind == NODE_PRECEDENCE ||
            kind == NODE_TYPE_DECL || kind == NODE_IMPORT ||
-           kind == NODE_ALIAS || kind == NODE_EXPORT_DECL;
+           kind == NODE_ALIAS || kind == NODE_EXPORT_DECL ||
+           kind == NODE_PURE || kind == NODE_DISTRIBUTIVE ||
+           kind == NODE_IDENTITY || kind == NODE_REQUIRES_IDENTITY;
 }
 
 static ASTNode *parse_import(Parser *p) {
@@ -1285,6 +1330,22 @@ ASTNode *parse_statement(Parser *p) {
         if (strcmp(t->text, "alias") == 0) return parse_alias(p);
         if (strcmp(t->text, "type") == 0) return parse_type_decl(p);
         if (strcmp(t->text, "export") == 0) return parse_export_decl(p);
+        if (strcmp(t->text, "pure") == 0) {
+            SrcLoc loc = t->loc;
+            eat(p);
+            return ast_new(p->arena, NODE_PURE, loc);
+        }
+        if (strcmp(t->text, "distributive") == 0) {
+            SrcLoc loc = t->loc;
+            eat(p); /* distributive */
+            ASTNode *n = ast_new(p->arena, NODE_DISTRIBUTIVE, loc);
+            n->distributive.dist_outer_fn = cur(p)->text;
+            eat(p); /* outer fn name */
+            if (at_text(p, "over")) eat(p); /* over */
+            n->distributive.dist_inner_fn = cur(p)->text;
+            eat(p); /* inner fn name */
+            return n;
+        }
         if (strcmp(t->text, "if") == 0) return parse_if(p);
         if (strcmp(t->text, "while") == 0) return parse_while(p);
         if (strcmp(t->text, "for") == 0) return parse_for(p);

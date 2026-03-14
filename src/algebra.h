@@ -59,6 +59,12 @@ typedef struct {
 
 /* ── Algebra Registry ────────────────────────────────────────────── */
 
+/* Distributive declaration: outer distributes over inner */
+typedef struct {
+    const char *outer_fn;    /* e.g., "multiply" */
+    const char *inner_fn;    /* e.g., "add" */
+} DistributiveEntry;
+
 typedef struct AlgebraEntry {
     const char *name;
     SigilBindingList bindings;
@@ -68,6 +74,9 @@ typedef struct AlgebraEntry {
     AliasList aliases;
     ExportList exports;
     AlgTypeList types;
+    bool is_pure;                    /* true if 'pure' declared */
+    DistributiveEntry *distributives; /* distributive declarations */
+    int distributive_count;
 } AlgebraEntry;
 
 DA_TYPEDEF(AlgebraEntry*, AlgebraList)

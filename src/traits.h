@@ -13,13 +13,22 @@ typedef struct TraitDef {
     const char *source_algebra; /* algebra that declared this trait */
     NodeList method_sigs;       /* NODE_FN_DECL signatures */
     StrList requires;           /* prerequisite trait names */
+    StrList required_identities; /* fn names that require identity declarations */
 } TraitDef;
+
+/* Identity binding: constant expression as identity element for a function */
+typedef struct {
+    const char *fn_name;
+    ASTNode *value;
+} IdentityEntry;
 
 typedef struct TraitImpl {
     const char *trait_name;
     const char *concrete_type;
     const char *source_algebra; /* algebra that declared this implementation */
     NodeList methods;           /* concrete method implementations */
+    IdentityEntry *identities;  /* identity declarations */
+    int identity_count;
 } TraitImpl;
 
 DA_TYPEDEF(TraitDef*, TraitDefList)

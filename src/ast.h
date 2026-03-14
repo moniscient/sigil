@@ -61,6 +61,12 @@ typedef enum {
     /* Imports */
     NODE_IMPORT,       /* import declaration */
 
+    /* Parallel / purity */
+    NODE_PURE,         /* pure declaration in algebra */
+    NODE_IDENTITY,     /* identity fn_name expr in implement block */
+    NODE_REQUIRES_IDENTITY, /* requires identity fn_name in trait block */
+    NODE_DISTRIBUTIVE, /* distributive A over B in algebra */
+
     /* Special */
     NODE_BLOCK,        /* sequence of statements */
     NODE_PARAM,        /* function parameter */
@@ -133,6 +139,7 @@ struct ASTNode {
     NodeKind kind;
     SrcLoc loc;
     TypeRef *resolved_type;  /* populated by type checker for C emitter */
+    void *parallel;          /* ParallelAnnotation*, populated by mechanism selector; NULL = not analyzed */
 
     union {
         /* NODE_FN_DECL */
@@ -165,6 +172,7 @@ struct ASTNode {
         struct {
             const char *algebra_name;
             NodeList declarations;
+            bool is_pure;          /* true if 'pure' declared */
         } algebra;
 
         /* NODE_USE */
@@ -339,6 +347,23 @@ struct ASTNode {
             const char *trait_name;
             const char *for_name;    /* function or type this export applies to */
         } export_decl;
+
+        /* NODE_IDENTITY */
+        struct {
+            const char *identity_fn_name;  /* which function this is identity for */
+            ASTNode *identity_value;       /* constant expression */
+        } identity;
+
+        /* NODE_REQUIRES_IDENTITY */
+        struct {
+            const char *req_identity_fn;   /* fn name that requires an identity */
+        } requires_identity;
+
+        /* NODE_DISTRIBUTIVE */
+        struct {
+            const char *dist_outer_fn;     /* the distributing operation (e.g., "multiply") */
+            const char *dist_inner_fn;     /* the operation distributed over (e.g., "add") */
+        } distributive;
 
         /* NODE_AS_EXPR */
         struct {

@@ -15,6 +15,7 @@ static const char *structural_keywords[] = {
     "lambda", "collect", "apply", "from", "where",
     "import", "break", "continue", "alias",
     "export", "required", "optional", "private", "as",
+    "pure", "distributive", "over",
     NULL
 };
 

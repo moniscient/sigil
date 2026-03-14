@@ -44,6 +44,13 @@ void trait_register_def(TraitRegistry *tr, ASTNode *trait_node) {
     def->source_algebra = NULL;
     def->method_sigs = trait_node->trait_decl.methods;
     def->requires = trait_node->trait_decl.requires;
+    /* Extract required identity declarations from method_sigs */
+    da_init(&def->required_identities);
+    for (int i = 0; i < def->method_sigs.count; i++) {
+        ASTNode *sig = def->method_sigs.items[i];
+        if (sig->kind == NODE_REQUIRES_IDENTITY)
+            da_push(&def->required_identities, sig->requires_identity.req_identity_fn);
+    }
     da_push(&tr->defs, def);
 }
 
@@ -53,7 +60,27 @@ void trait_register_impl(TraitRegistry *tr, ASTNode *impl_node) {
     impl->trait_name = intern_cstr(tr->intern_tab, impl_node->implement.trait_name);
     impl->concrete_type = intern_cstr(tr->intern_tab, impl_node->implement.concrete_type);
     impl->source_algebra = NULL;
-    impl->methods = impl_node->implement.methods;
+
+    /* Separate NODE_IDENTITY entries from method nodes */
+    NodeList methods_only;
+    da_init(&methods_only);
+    impl->identities = NULL;
+    impl->identity_count = 0;
+
+    for (int i = 0; i < impl_node->implement.methods.count; i++) {
+        ASTNode *m = impl_node->implement.methods.items[i];
+        if (m->kind == NODE_IDENTITY) {
+            int idx = impl->identity_count++;
+            impl->identities = realloc(impl->identities,
+                impl->identity_count * sizeof(IdentityEntry));
+            impl->identities[idx].fn_name =
+                intern_cstr(tr->intern_tab, m->identity.identity_fn_name);
+            impl->identities[idx].value = m->identity.identity_value;
+        } else {
+            da_push(&methods_only, m);
+        }
+    }
+    impl->methods = methods_only;
     da_push(&tr->impls, impl);
 }
 
@@ -144,6 +171,24 @@ bool trait_check_all(TraitRegistry *tr) {
                          "that defines '%s' or '%s'",
                          impl->trait_name, impl->concrete_type,
                          impl->trait_name, impl->concrete_type);
+                ok = false;
+            }
+        }
+
+        /* Check identity completeness: all required identities must be provided */
+        for (int j = 0; j < def->required_identities.count; j++) {
+            const char *req_fn = intern_cstr(tr->intern_tab, def->required_identities.items[j]);
+            bool found = false;
+            for (int k = 0; k < impl->identity_count; k++) {
+                if (impl->identities[k].fn_name == req_fn) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                error_add(tr->errors, ERR_TRAIT, (SrcLoc){NULL, 0, 0, 0},
+                         "implementation of '%s' for '%s' is missing identity for '%s'",
+                         impl->trait_name, impl->concrete_type, req_fn);
                 ok = false;
             }
         }

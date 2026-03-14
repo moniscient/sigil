@@ -128,6 +128,20 @@ void algebra_register_declarations(AlgebraRegistry *r, AlgebraEntry *alg, ASTNod
                 da_push(&alg->types, te);
                 break;
             }
+            case NODE_PURE:
+                alg->is_pure = true;
+                algebra_node->algebra.is_pure = true;
+                break;
+            case NODE_DISTRIBUTIVE: {
+                int idx = alg->distributive_count++;
+                alg->distributives = realloc(alg->distributives,
+                    alg->distributive_count * sizeof(DistributiveEntry));
+                alg->distributives[idx].outer_fn =
+                    intern_cstr(r->intern_tab, decl->distributive.dist_outer_fn);
+                alg->distributives[idx].inner_fn =
+                    intern_cstr(r->intern_tab, decl->distributive.dist_inner_fn);
+                break;
+            }
             default:
                 break;
         }

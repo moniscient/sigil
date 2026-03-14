@@ -9,7 +9,7 @@ SRCS = $(SRCDIR)/main.c $(SRCDIR)/unicode.c $(SRCDIR)/errors.c \
        $(SRCDIR)/tokenizer.c $(SRCDIR)/parser.c $(SRCDIR)/algebra.c \
        $(SRCDIR)/desugarer.c $(SRCDIR)/types.c $(SRCDIR)/traits.c \
        $(SRCDIR)/resolver.c $(SRCDIR)/skw_emitter.c $(SRCDIR)/c_emitter.c \
-       $(SRCDIR)/sigil_runtime.c \
+       $(SRCDIR)/parallel.c $(SRCDIR)/sigil_runtime.c \
        $(SRCDIR)/sigil_thunk.c $(SRCDIR)/sigil_expander.c \
        $(SRCDIR)/sigil_classifier.c $(SRCDIR)/sigil_hardware.c \
        $(SRCDIR)/sigil_exec_seq.c $(SRCDIR)/sigil_exec_coro.c \

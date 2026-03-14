@@ -9,6 +9,7 @@
 #include "resolver.h"
 #include "skw_emitter.h"
 #include "c_emitter.h"
+#include "parallel.h"
 #include "errors.h"
 
 static char *read_file(const char *path) {
@@ -163,6 +164,12 @@ int main(int argc, char **argv) {
         error_print_all(&errors);
         goto cleanup;
     }
+
+    /* Phase 6.5: Mechanism selection (parallel strategy annotation) */
+    MechanismSelector mech_sel;
+    mechanism_selector_init(&mech_sel, &arena, &intern_tab,
+                            &algebra_reg, &trait_reg, &type_checker, &errors);
+    mechanism_select(&mech_sel, ast);
 
     /* Phase 7: Output */
     {

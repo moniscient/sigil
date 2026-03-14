@@ -1,4 +1,5 @@
 #include "c_emitter.h"
+#include "parallel.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -1461,6 +1462,12 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
         }
 
         case NODE_COMPREHENSION: {
+            if (node->parallel) {
+                ParallelAnnotation *ann = (ParallelAnnotation *)node->parallel;
+                fprintf(e->out, "/* PAR_STRATEGY: %s", parallel_strategy_name(ann->strategy));
+                if (ann->is_pure) fprintf(e->out, " [pure]");
+                fprintf(e->out, " */ ");
+            }
             /* Emit as GCC statement expression */
             fprintf(e->out, "({ SigilMap *_comp_result = sigil_map_new();\n");
 
@@ -1632,6 +1639,16 @@ static void emit_stmt(CEmitter *e, ASTNode *node) {
             break;
 
         case NODE_FOR:
+            if (node->parallel) {
+                ParallelAnnotation *ann = (ParallelAnnotation *)node->parallel;
+                emit_indent(e);
+                fprintf(e->out, "/* PAR_STRATEGY: %s", parallel_strategy_name(ann->strategy));
+                if (ann->reduction_fn)
+                    fprintf(e->out, " (reduction over \"%s\")", ann->reduction_fn);
+                if (ann->is_pure)
+                    fprintf(e->out, " [pure]");
+                fprintf(e->out, " */\n");
+            }
             emit_indent(e);
             fprintf(e->out, "{\n");
             e->indent++;
