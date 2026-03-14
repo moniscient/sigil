@@ -158,6 +158,13 @@ static void flatten_node(Desugarer *d, ASTNode *node, TokenList *out) {
             flatten_node(d, node->for_stmt.iterable, out);
             flatten_node(d, node->for_stmt.for_body, out);
             break;
+        case NODE_AS_EXPR:
+            flatten_node(d, node->as_expr.source, out);
+            t.kind = TOK_KEYWORD; t.text = intern_cstr(d->intern_tab, "as");
+            da_push(out, t);
+            t.kind = TOK_IDENT; t.text = node->as_expr.target_algebra;
+            da_push(out, t);
+            break;
         default:
             break;
     }
@@ -739,6 +746,22 @@ static ASTNode *ep_parse_kw_call(ExprParser *ep, const char *name, SrcLoc loc) {
     return n;
 }
 
+/* If the next token is the keyword 'as', consume it and wrap node in NODE_AS_EXPR. */
+static ASTNode *maybe_wrap_as(ExprParser *ep, ASTNode *node) {
+    if (!node) return node;
+    if (ep_at_eof(ep)) return node;
+    Token *t = ep_cur(ep);
+    if (!t || t->kind != TOK_KEYWORD || strcmp(t->text, "as") != 0) return node;
+    ep_eat(ep); /* consume 'as' */
+    if (ep_at_eof(ep)) return node; /* malformed, leave as-is */
+    const char *alg_name = ep_cur(ep)->text;
+    ep_eat(ep);
+    ASTNode *as_node = ast_new(ep->d->arena, NODE_AS_EXPR, node->loc);
+    as_node->as_expr.source = node;
+    as_node->as_expr.target_algebra = alg_name;
+    return as_node;
+}
+
 static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
     if (ep_at_eof(ep)) return NULL;
     Token *t = ep_cur(ep);
@@ -757,7 +780,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
         ASTNode *n = ast_new(ep->d->arena, is_var ? NODE_VAR : NODE_LET, loc);
         n->binding.bind_name = name;
 
-        n->binding.value = expr_parse_prec(ep, 0);
+        n->binding.value = maybe_wrap_as(ep, expr_parse_prec(ep, 0));
         return n;
     }
 
@@ -770,7 +793,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
 
         ASTNode *n = ast_new(ep->d->arena, NODE_ASSIGN, loc);
         n->assign.assign_name = name;
-        n->assign.value = expr_parse_prec(ep, 0);
+        n->assign.value = maybe_wrap_as(ep, expr_parse_prec(ep, 0));
         return n;
     }
 
@@ -780,7 +803,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
         ep_eat(ep);
         ASTNode *n = ast_new(ep->d->arena, NODE_RETURN, loc);
         if (!ep_at_eof(ep) && ep_cur(ep)->kind != TOK_END)
-            n->ret.value = expr_parse_prec(ep, 0);
+            n->ret.value = maybe_wrap_as(ep, expr_parse_prec(ep, 0));
         else
             n->ret.value = NULL;
         return n;
@@ -866,7 +889,7 @@ static ASTNode *ep_parse_use_stmt(ExprParser *ep) {
     }
 
     /* Otherwise: sigil expression */
-    return expr_parse_prec(ep, 0);
+    return maybe_wrap_as(ep, expr_parse_prec(ep, 0));
 }
 
 /* ── Use Block Body Re-parsing ───────────────────────────────────── */
@@ -1070,6 +1093,11 @@ static ASTNode *desugar_node(Desugarer *d, ASTNode *node) {
         case NODE_CONTINUE:
         case NODE_LAMBDA:
         case NODE_COMPREHENSION:
+        case NODE_EXPORT_DECL:
+            break;
+
+        case NODE_AS_EXPR:
+            node->as_expr.source = desugar_node(d, node->as_expr.source);
             break;
     }
 

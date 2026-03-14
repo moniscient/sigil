@@ -32,7 +32,7 @@ typedef struct TypeOwner {
     struct TypeOwner *next;
 } TypeOwner;
 
-typedef struct {
+typedef struct TraitRegistry {
     TraitDefList defs;
     TraitImplList impls;
     TypeOwner *type_owners;   /* linked list of type→algebra mappings */

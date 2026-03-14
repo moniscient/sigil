@@ -19,6 +19,8 @@ AlgebraEntry *algebra_registry_add(AlgebraRegistry *r, const char *name) {
     da_init(&e->trait_decls);
     da_init(&e->implement_blocks);
     da_init(&e->aliases);
+    da_init(&e->exports);
+    da_init(&e->types);
     da_push(&r->algebras, e);
     return e;
 }
@@ -109,6 +111,21 @@ void algebra_register_declarations(AlgebraRegistry *r, AlgebraEntry *alg, ASTNod
                 ae.to_text = intern_cstr(r->intern_tab, decl->alias.alias_to);
                 ae.to_kind = alias_target_kind(decl->alias.alias_to);
                 da_push(&alg->aliases, ae);
+                break;
+            }
+            case NODE_EXPORT_DECL: {
+                ExportEntry ee;
+                ee.visibility = decl->export_decl.visibility;
+                ee.trait_name = intern_cstr(r->intern_tab, decl->export_decl.trait_name);
+                ee.for_name   = intern_cstr(r->intern_tab, decl->export_decl.for_name);
+                da_push(&alg->exports, ee);
+                break;
+            }
+            case NODE_TYPE_DECL: {
+                AlgTypeEntry te;
+                te.type_name  = intern_cstr(r->intern_tab, decl->type_decl.type_name);
+                te.base_type  = decl->type_decl.base_type;
+                da_push(&alg->types, te);
                 break;
             }
             default:
@@ -462,4 +479,69 @@ bool algebra_apply_alias(AlgebraEntry *alg, Token *tok, InternTable *intern_tab)
     tok->text = intern_cstr(intern_tab, ae->to_text);
     tok->kind = ae->to_kind;
     return true;
+}
+
+bool algebra_check_cast(AlgebraRegistry *r, TraitRegistry *tr __attribute__((unused)),
+                        const char *src_algebra_name,
+                        const char *tgt_algebra_name,
+                        TypeRef *base_type __attribute__((unused)),
+                        ErrorList *errors) {
+    bool ok = true;
+
+    AlgebraEntry *src = algebra_registry_find(r, src_algebra_name);
+    AlgebraEntry *tgt = algebra_registry_find(r, tgt_algebra_name);
+
+    if (!tgt) {
+        error_add(errors, ERR_TRAIT, (SrcLoc){NULL, 0, 0, 0},
+                 "cast to unknown algebra '%s'", tgt_algebra_name);
+        return false;
+    }
+
+    /* Layout compatibility: if base_type is non-NULL, verify target has
+     * a type with a matching base_type kind. */
+    if (base_type && tgt->types.count > 0) {
+        bool tgt_has_match = false;
+        for (int i = 0; i < tgt->types.count; i++) {
+            if (tgt->types.items[i].base_type &&
+                tgt->types.items[i].base_type->kind == base_type->kind) {
+                tgt_has_match = true;
+                break;
+            }
+        }
+        if (!tgt_has_match) {
+            error_add(errors, ERR_TRAIT, (SrcLoc){NULL, 0, 0, 0},
+                     "cast to algebra '%s': incompatible base type layout",
+                     tgt_algebra_name);
+            ok = false;
+        }
+    }
+
+    /* For every EXPORT_REQUIRED in target, source must have a matching
+     * export with visibility != EXPORT_PRIVATE. */
+    for (int i = 0; i < tgt->exports.count; i++) {
+        if (tgt->exports.items[i].visibility != EXPORT_REQUIRED) continue;
+
+        const char *req_trait = tgt->exports.items[i].trait_name;
+        const char *req_for   = tgt->exports.items[i].for_name;
+
+        bool found = false;
+        if (src) {
+            for (int j = 0; j < src->exports.count; j++) {
+                if (src->exports.items[j].visibility == EXPORT_PRIVATE) continue;
+                if (strcmp(src->exports.items[j].trait_name, req_trait) == 0 &&
+                    strcmp(src->exports.items[j].for_name, req_for) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            error_add(errors, ERR_TRAIT, (SrcLoc){NULL, 0, 0, 0},
+                     "cast from algebra '%s' to '%s': source does not export required trait '%s' for '%s'",
+                     src_algebra_name, tgt_algebra_name, req_trait, req_for);
+            ok = false;
+        }
+    }
+
+    return ok;
 }

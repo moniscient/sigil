@@ -3,6 +3,14 @@
 
 #include "common.h"
 
+/* ── Export Visibility ────────────────────────────────────────────── */
+
+typedef enum {
+    EXPORT_REQUIRED,
+    EXPORT_OPTIONAL,
+    EXPORT_PRIVATE
+} ExportVisibility;
+
 /* ── AST Node Types ──────────────────────────────────────────────── */
 
 typedef enum {
@@ -16,6 +24,8 @@ typedef enum {
     NODE_PRECEDENCE,
     NODE_TYPE_DECL,
     NODE_ALIAS,
+    NODE_EXPORT_DECL,
+    NODE_AS_EXPR,
 
     /* Statements */
     NODE_LET,
@@ -314,6 +324,7 @@ struct ASTNode {
             int field_count;
             TypeRef **field_types;
             const char **field_names;
+            TypeRef *base_type;  /* primitive foundation for algebraic types; NULL = struct-like */
         } type_decl;
 
         /* NODE_ALIAS */
@@ -321,6 +332,19 @@ struct ASTNode {
             const char *alias_from;
             const char *alias_to;
         } alias;
+
+        /* NODE_EXPORT_DECL */
+        struct {
+            ExportVisibility visibility;
+            const char *trait_name;
+            const char *for_name;    /* function or type this export applies to */
+        } export_decl;
+
+        /* NODE_AS_EXPR */
+        struct {
+            ASTNode *source;
+            const char *target_algebra;
+        } as_expr;
 
         /* NODE_PROGRAM */
         struct {

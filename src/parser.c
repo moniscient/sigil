@@ -645,7 +645,7 @@ static bool is_decl_node(NodeKind kind) {
            kind == NODE_IMPLEMENT || kind == NODE_ALGEBRA ||
            kind == NODE_LIBRARY || kind == NODE_PRECEDENCE ||
            kind == NODE_TYPE_DECL || kind == NODE_IMPORT ||
-           kind == NODE_ALIAS;
+           kind == NODE_ALIAS || kind == NODE_EXPORT_DECL;
 }
 
 static ASTNode *parse_import(Parser *p) {
@@ -789,6 +789,32 @@ static ASTNode *parse_alias(Parser *p) {
     return n;
 }
 
+static ASTNode *parse_export_decl(Parser *p) {
+    SrcLoc loc = cur(p)->loc;
+    expect_text(p, "export");
+    ASTNode *n = ast_new(p->arena, NODE_EXPORT_DECL, loc);
+
+    /* visibility: required | optional | private */
+    if (at_text(p, "required"))       { n->export_decl.visibility = EXPORT_REQUIRED; eat(p); }
+    else if (at_text(p, "optional"))  { n->export_decl.visibility = EXPORT_OPTIONAL; eat(p); }
+    else if (at_text(p, "private"))   { n->export_decl.visibility = EXPORT_PRIVATE;  eat(p); }
+    else {
+        error_add(p->errors, ERR_PARSER, cur(p)->loc,
+                 "expected 'required', 'optional', or 'private' after 'export'");
+        n->export_decl.visibility = EXPORT_PRIVATE;
+    }
+
+    n->export_decl.trait_name = cur(p)->text;
+    eat(p); /* trait name */
+
+    if (at_text(p, "for")) eat(p);
+
+    n->export_decl.for_name = cur(p)->text;
+    eat(p); /* function or type name */
+
+    return n;
+}
+
 static ASTNode *parse_type_decl(Parser *p) {
     SrcLoc loc = cur(p)->loc;
     expect_text(p, "type");
@@ -799,6 +825,28 @@ static ASTNode *parse_type_decl(Parser *p) {
         eat(p);
     else
         expect(p, TOK_IDENT, "type name");
+
+    /* Check for algebraic base-type declaration:
+     * "type Foo int" — a type keyword NOT followed by an identifier field name */
+    n->type_decl.base_type = NULL;
+    if (!at_eof(p) && is_type_keyword(cur(p)->text)) {
+        /* It's a base-type declaration if we're at EOF after the type keyword,
+         * at a newline, or the next token after the type keyword is not an ident
+         * (i.e., no field name follows). */
+        Token *next = peek(p, 1);
+        bool is_base = at_eof(p) || !next ||
+                       next->kind == TOK_NEWLINE ||
+                       next->kind == TOK_END ||
+                       (next->kind != TOK_IDENT &&
+                        !(next->kind == TOK_KEYWORD && is_type_keyword(next->text)));
+        if (is_base) {
+            n->type_decl.base_type = parse_type(p);
+            n->type_decl.field_count = 0;
+            n->type_decl.field_types = NULL;
+            n->type_decl.field_names = NULL;
+            return n;
+        }
+    }
 
     /* Parse field pairs: type name, repeated */
     TypeRef *ftypes[64];
@@ -1236,6 +1284,7 @@ ASTNode *parse_statement(Parser *p) {
         if (strcmp(t->text, "precedence") == 0) return parse_precedence(p);
         if (strcmp(t->text, "alias") == 0) return parse_alias(p);
         if (strcmp(t->text, "type") == 0) return parse_type_decl(p);
+        if (strcmp(t->text, "export") == 0) return parse_export_decl(p);
         if (strcmp(t->text, "if") == 0) return parse_if(p);
         if (strcmp(t->text, "while") == 0) return parse_while(p);
         if (strcmp(t->text, "for") == 0) return parse_for(p);

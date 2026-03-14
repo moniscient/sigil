@@ -5,6 +5,9 @@
 #include "tokenizer.h"
 #include "errors.h"
 
+/* Forward declaration to avoid circular include (traits.h includes algebra.h) */
+typedef struct TraitRegistry TraitRegistry;
+
 /* ── Sigil Binding ───────────────────────────────────────────────── */
 
 typedef struct {
@@ -31,6 +34,22 @@ typedef struct {
 
 DA_TYPEDEF(AliasEntry, AliasList)
 
+/* ── Export Layout ───────────────────────────────────────────────── */
+
+typedef struct {
+    ExportVisibility visibility;
+    const char *trait_name;
+    const char *for_name;
+} ExportEntry;
+
+typedef struct {
+    const char *type_name;
+    TypeRef *base_type;   /* primitive foundation; NULL = struct-like */
+} AlgTypeEntry;
+
+DA_TYPEDEF(ExportEntry, ExportList)
+DA_TYPEDEF(AlgTypeEntry, AlgTypeList)
+
 /* ── Precedence Table ────────────────────────────────────────────── */
 
 typedef struct {
@@ -47,6 +66,8 @@ typedef struct AlgebraEntry {
     NodeList trait_decls;
     NodeList implement_blocks;
     AliasList aliases;
+    ExportList exports;
+    AlgTypeList types;
 } AlgebraEntry;
 
 DA_TYPEDEF(AlgebraEntry*, AlgebraList)
@@ -87,5 +108,15 @@ AliasEntry *algebra_find_alias(AlgebraEntry *alg, const char *text);
 
 /* Apply an algebra's aliases to a token, modifying it in place. Returns true if aliased. */
 bool algebra_apply_alias(AlgebraEntry *alg, Token *tok, InternTable *intern_tab);
+
+/* Verify that a cast from src_algebra to tgt_algebra is legal for the given
+ * base_type. Checks layout compatibility and that all EXPORT_REQUIRED traits
+ * in the target are exported (REQUIRED or OPTIONAL) by the source.
+ * Returns true if the cast is legal. */
+bool algebra_check_cast(AlgebraRegistry *r, TraitRegistry *tr,
+                        const char *src_algebra_name,
+                        const char *tgt_algebra_name,
+                        TypeRef *base_type,
+                        ErrorList *errors);
 
 #endif /* SIGIL_ALGEBRA_H */

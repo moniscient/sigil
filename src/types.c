@@ -130,10 +130,15 @@ void type_checker_init(TypeChecker *tc, Arena *arena, InternTable *intern_tab, E
     tc->current_fn_return_type = NULL;
     tc->type_registry = NULL;
     tc->trait_registry = NULL;
+    tc->algebra_registry = NULL;
 }
 
 void type_checker_set_trait_registry(TypeChecker *tc, TraitRegistry *tr) {
     tc->trait_registry = tr;
+}
+
+void type_checker_set_algebra_registry(TypeChecker *tc, AlgebraRegistry *r) {
+    tc->algebra_registry = r;
 }
 
 TypeEnv *type_env_push(TypeEnv *parent) {
@@ -758,6 +763,23 @@ static TypeRef *check_node(TypeChecker *tc, ASTNode *node, TypeEnv *env) {
             return make_type(tc->arena, TYPE_VOID);
 
         case NODE_PRECEDENCE:
+        case NODE_AS_EXPR: {
+            TypeRef *src_type = check_node(tc, node->as_expr.source, env);
+            if (tc->algebra_registry && tc->trait_registry) {
+                const char *src_alg = NULL;
+                if (src_type && src_type->kind == TYPE_NAMED)
+                    src_alg = trait_find_type_owner(tc->trait_registry, src_type->name);
+                if (!src_alg) src_alg = "";
+                algebra_check_cast(tc->algebra_registry, tc->trait_registry,
+                                   src_alg, node->as_expr.target_algebra,
+                                   src_type, tc->errors);
+            }
+            result_type = src_type ? src_type : make_type(tc->arena, TYPE_UNKNOWN);
+            node->resolved_type = result_type;
+            return result_type;
+        }
+
+        case NODE_EXPORT_DECL:
         case NODE_ALIAS:
         case NODE_PARAM:
         case NODE_TYPE_REF:
