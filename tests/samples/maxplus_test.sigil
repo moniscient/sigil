@@ -1,0 +1,60 @@
+import "max_plus.sigil"
+
+use MaxPlus
+
+  rem ── All-pairs longest paths on a weighted directed graph ──────
+  rem
+  rem Graph: linear chain 0 → 1 → 2 → ... → N-1 with unit-weight edges.
+  rem In the max-plus semiring:
+  rem   tropical add (+)  = max
+  rem   tropical mult (*) = ordinary addition
+  rem
+  rem tropical_closure computes Floyd-Warshall in the max-plus semiring.
+  rem Expected after closure:
+  rem   dist[i][j] = j - i    if j >= i (forward path length)
+  rem   dist[i][j] = -inf     if j < i  (no backward path)
+
+  let N 300
+
+  rem Build N x N adjacency matrix
+  rem A[i][i] = 0, A[i][i+1] = 1, otherwise = -inf
+  rem Note: subtract j i tests j - i using builtin subtraction
+  var A mapnew
+  for i in range 0 N begin
+    var row mapnew
+    for j in range 0 N begin
+      if equal i j begin
+        set row j 0
+      end elif equal (subtract j i) 1 begin
+        set row j 1
+      end else begin
+        set row j (negate 999999999)
+      end
+    end
+    set A i row
+  end
+
+  rem ── Compute all-pairs longest paths ───────────────────────────
+  let dist (tropical_closure A N)
+
+  rem ── Spot-check closure results ────────────────────────────────
+  rem dist[0][299] = 299 (full chain length)
+  print (get dist 0 299)
+  rem dist[0][0] = 0
+  print (get dist 0 0)
+  rem dist[299][0] = -inf (no backward path)
+  print (get dist 299 0)
+  rem dist[1][5] = 4
+  print (get dist 1 5)
+  rem ── Verification ──────────────────────────────────────────────
+  var bad 0
+  if not (equal (get dist 0 299) 299) begin
+    assign bad 1
+  end
+  if not (equal (get dist 0 0) 0) begin
+    assign bad 1
+  end
+  if not (equal (get dist 1 5) 4) begin
+    assign bad 1
+  end
+  print bad

@@ -175,3 +175,14 @@ And `TYPE_NAMED` fell through to the `default: sigil_print_int` case.
 - **Status**: Fixed (2026-03-14)
 
 ---
+
+### BUG-015: algebra_registry_add does not initialize distributive_count and distributives
+- **Discovered**: 2026-03-14, during maxplus_test.sigil development
+- **Category**: Codegen
+- **Severity**: Critical
+- **Description**: `algebra_registry_add` in `algebra.c` did not initialize `is_pure`, `distributives`, or `distributive_count`. Arena allocation does not zero memory, so these fields contained garbage from previously used heap blocks. With larger programs, the garbage `distributive_count` triggered a massive realloc in `algebra_register_declarations`, crashing with "pointer being freed was not allocated."
+- **Fix**: Added `e->is_pure = false; e->distributives = NULL; e->distributive_count = 0;` to `algebra_registry_add`.
+- **Files**: `src/algebra.c`
+- **Status**: Fixed (2026-03-14)
+
+---

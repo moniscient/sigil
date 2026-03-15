@@ -21,6 +21,9 @@ AlgebraEntry *algebra_registry_add(AlgebraRegistry *r, const char *name) {
     da_init(&e->aliases);
     da_init(&e->exports);
     da_init(&e->types);
+    e->is_pure = false;
+    e->distributives = NULL;
+    e->distributive_count = 0;
     da_push(&r->algebras, e);
     return e;
 }
