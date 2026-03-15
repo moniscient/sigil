@@ -4,7 +4,7 @@ set -e
 
 SIGIL="./build/sigil"
 CC="cc"
-CFLAGS="-std=c11 -I src -pthread"
+CFLAGS="-std=c11 -O3 -I src -pthread"
 RUNTIME="src/sigil_runtime.c src/sigil_thunk.c src/sigil_expander.c src/sigil_classifier.c src/sigil_hardware.c src/sigil_exec_seq.c src/sigil_exec_coro.c src/sigil_exec_thread.c src/sigil_exec_gpu.c src/sigil_executor.c"
 TMPDIR=$(mktemp -d)
 PASS=0

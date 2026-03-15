@@ -40,8 +40,10 @@
 
 ---
 
+---
+
 ## Resolved Bugs (moved to BUGS-RESOLVED.md when fixed)
 
 ---
 
-Next valid BUG ID: BUG-013
+Next valid BUG ID: BUG-014

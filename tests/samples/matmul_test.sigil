@@ -4,8 +4,8 @@ use MatrixArithmetic
 
   rem Large matrix multiply: N x N times N x N
   rem N^3 dot product steps with hash-map-backed storage.
-  rem N=750 gives ~70 seconds sequentially (no optimization).
-  let N 750
+  rem N=1100 gives ~60 seconds with -O3.
+  let N 1100
 
   rem Build A: N x N matrix, A[i][j] = i + j + 1
   var A mapnew
@@ -30,26 +30,26 @@ use MatrixArithmetic
   rem C = A @ B  (N x N result)
   rem Each C[i][j] = sum_{k=0}^{N-1} (i + k + 1)
   rem            = N*i + N*(N+1)/2
-  rem For N=750: C[0][0]   = 750*751/2         = 281625
-  rem           C[374][374] = 750*374 + 281625  = 562125
-  rem           C[749][749] = 750*749 + 281625  = 843375
+  rem For N=1100: C[0][0]    = 1100*1101/2          = 605550
+  rem            C[549][549] = 1100*549 + 605550    = 1209450
+  rem            C[1099][1099] = 1100*1099 + 605550 = 1814450
   var C mapnew
   C = (A @ B)
 
   rem Spot-check results
   print (get C 0 0)
-  print (get C 374 374)
-  print (get C 749 749)
+  print (get C 549 549)
+  print (get C 1099 1099)
 
   rem Verify
   var bad 0
-  if not (equal (get C 0 0) 281625) {
+  if not (equal (get C 0 0) 605550) {
     bad = (bad + 1)
   }
-  if not (equal (get C 374 374) 562125) {
+  if not (equal (get C 549 549) 1209450) {
     bad = (bad + 1)
   }
-  if not (equal (get C 749 749) 843375) {
+  if not (equal (get C 1099 1099) 1814450) {
     bad = (bad + 1)
   }
   print bad

@@ -164,3 +164,14 @@ And `TYPE_NAMED` fell through to the `default: sigil_print_int` case.
 - **Status**: Fixed (2026-03-14)
 
 ---
+
+### BUG-013: C emitter generates thunk evaluators for uncalled algebra functions
+- **Discovered**: 2026-03-14, during matmul performance investigation
+- **Category**: Codegen
+- **Severity**: High
+- **Description**: The C emitter assigned thunk IDs and generated evaluator/constructor wrappers for ALL user-defined functions in imported algebras, regardless of whether they were called from any `use` block. With 9 functions (7 uncalled), the dead evaluator bodies (~1600 bytes) shifted the hot loop in `sigil_dot` to an M1 Firestorm fetch-block alignment that halved decode width, causing a 3.3x runtime slowdown (62s → 210s for N=750 matmul).
+- **Fix**: Added `collect_call_names` helper to compute the transitive call closure from `use` block statements. Both the thunk ID assignment loop and the evaluator emission loop (Pass 3) now skip functions not in this closure. A `visited` set prevents infinite recursion from self-referential function bodies. Thunk count dropped from 9 to 4, restoring performance to 62s.
+- **Files**: `src/c_emitter.c` (`collect_call_names`, thunk ID assignment, Pass 3 emission)
+- **Status**: Fixed (2026-03-14)
+
+---

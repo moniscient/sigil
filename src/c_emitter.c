@@ -2606,6 +2606,73 @@ static bool is_executable_stmt(ASTNode *node) {
     }
 }
 
+/* Collect all function call names from an AST subtree (for thunk reachability). */
+static void collect_call_names(ASTNode *node, StrList *names) {
+    if (!node) return;
+    switch (node->kind) {
+        case NODE_CALL:
+            da_push(names, node->call.call_name);
+            for (int i = 0; i < node->call.args.count; i++)
+                collect_call_names(node->call.args.items[i], names);
+            break;
+        case NODE_CHAIN:
+            da_push(names, node->chain.chain_fn_name);
+            for (int i = 0; i < node->chain.chain_operands.count; i++)
+                collect_call_names(node->chain.chain_operands.items[i], names);
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < node->block.stmts.count; i++)
+                collect_call_names(node->block.stmts.items[i], names);
+            break;
+        case NODE_LET: case NODE_VAR:
+            collect_call_names(node->binding.value, names);
+            break;
+        case NODE_ASSIGN:
+            collect_call_names(node->assign.value, names);
+            break;
+        case NODE_RETURN:
+            collect_call_names(node->ret.value, names);
+            break;
+        case NODE_IF:
+            collect_call_names(node->if_stmt.condition, names);
+            collect_call_names(node->if_stmt.then_body, names);
+            for (int i = 0; i < node->if_stmt.elifs.count; i++)
+                collect_call_names(node->if_stmt.elifs.items[i], names);
+            collect_call_names(node->if_stmt.else_body, names);
+            break;
+        case NODE_WHILE:
+            collect_call_names(node->while_stmt.condition, names);
+            collect_call_names(node->while_stmt.while_body, names);
+            break;
+        case NODE_FOR:
+            collect_call_names(node->for_stmt.iterable, names);
+            collect_call_names(node->for_stmt.for_body, names);
+            break;
+        case NODE_MATCH:
+            collect_call_names(node->match_stmt.match_value, names);
+            for (int i = 0; i < node->match_stmt.cases.count; i++)
+                collect_call_names(node->match_stmt.cases.items[i], names);
+            break;
+        case NODE_CASE:
+            collect_call_names(node->case_branch.case_pattern, names);
+            collect_call_names(node->case_branch.case_body, names);
+            break;
+        case NODE_DEFAULT:
+            collect_call_names(node->default_branch.default_body, names);
+            break;
+        case NODE_COMPREHENSION:
+            collect_call_names(node->comprehension.comp_source, names);
+            collect_call_names(node->comprehension.comp_filter, names);
+            collect_call_names(node->comprehension.comp_transform, names);
+            break;
+        case NODE_LAMBDA:
+            collect_call_names(node->lambda.lambda_body, names);
+            break;
+        default:
+            break;
+    }
+}
+
 static void collect_top_stmts(ASTNode *node, FnList *stmts) {
     if (!node) return;
     if (node->kind == NODE_PROGRAM) {
@@ -3464,7 +3531,47 @@ void c_emit(CEmitter *e, ASTNode *node) {
         }
     }
 
-    /* Assign func_ids to all user-defined fns (skip var-param fns) */
+    /* Determine which functions are reachable from use-block call sites.
+     * Only reachable functions get thunk IDs — unreachable algebra functions
+     * (trait impl methods, utility fns never called) are emitted as plain C
+     * without evaluator/constructor wrappers, avoiding code bloat that can
+     * trigger M1 Firestorm decode-width alignment pathologies. */
+    FnList top_stmts_early = {NULL, 0, 0};
+    collect_top_stmts(node, &top_stmts_early);
+    StrList thunked_fns;
+    da_init(&thunked_fns);
+    /* Seed: collect call names from top-level (use block) statements */
+    for (int i = 0; i < top_stmts_early.count; i++)
+        collect_call_names(top_stmts_early.items[i], &thunked_fns);
+    /* Expand transitively: walk called functions' bodies for more calls.
+     * Track which function bodies we've already walked to avoid infinite
+     * loops from recursive functions (e.g., add's body calls add). */
+    {
+        StrList visited;
+        da_init(&visited);
+        int processed = 0;
+        while (processed < thunked_fns.count) {
+            const char *name = thunked_fns.items[processed++];
+            /* Skip if we've already walked this function's body */
+            bool seen = false;
+            for (int j = 0; j < visited.count; j++) {
+                if (strcmp(visited.items[j], name) == 0) { seen = true; break; }
+            }
+            if (seen) continue;
+            for (int i = 0; i < fns.count; i++) {
+                if (strcmp(fns.items[i]->fn_decl.fn_name, name) == 0 &&
+                    fns.items[i]->fn_decl.body) {
+                    da_push(&visited, name);
+                    collect_call_names(fns.items[i]->fn_decl.body, &thunked_fns);
+                    break;
+                }
+            }
+        }
+        da_free(&visited);
+    }
+    free(top_stmts_early.items);
+
+    /* Assign func_ids only to reachable user-defined fns */
     for (int i = 0; i < fns.count; i++) {
         ASTNode *fn = fns.items[i];
         if (fn->fn_decl.is_primitive) continue;
@@ -3477,6 +3584,15 @@ void c_emit(CEmitter *e, ASTNode *node) {
                 fn->fn_decl.pattern.items[j].is_mutable) { has_var = true; break; }
         }
         if (has_var) continue;
+        /* Only thunkify functions reachable from use-block call sites */
+        bool needed = false;
+        for (int j = 0; j < thunked_fns.count; j++) {
+            if (strcmp(fn->fn_decl.fn_name, thunked_fns.items[j]) == 0) {
+                needed = true;
+                break;
+            }
+        }
+        if (!needed) continue;
         int pc = 0;
         TypeRef *ptypes[32];
         for (int j = 0; j < fn->fn_decl.pattern.count; j++) {
@@ -3555,7 +3671,7 @@ void c_emit(CEmitter *e, ASTNode *node) {
         emit_mono_body(e, m);
     }
 
-    /* Pass 3: evaluators and constructors */
+    /* Pass 3: evaluators and constructors (only for thunk-registered fns) */
     {
         int id = 0;
         for (int i = 0; i < fns.count; i++) {
@@ -3563,13 +3679,21 @@ void c_emit(CEmitter *e, ASTNode *node) {
             if (fn->fn_decl.is_primitive) continue;
             if (!fn->fn_decl.body) continue;
             if (fn_is_generic(fn)) continue;
-            /* Skip var-param fns */
             bool has_var = false;
             for (int j = 0; j < fn->fn_decl.pattern.count; j++) {
                 if (fn->fn_decl.pattern.items[j].kind == PAT_PARAM &&
                     fn->fn_decl.pattern.items[j].is_mutable) { has_var = true; break; }
             }
             if (has_var) continue;
+            /* Same reachability filter as thunk ID assignment */
+            bool needed = false;
+            for (int j = 0; j < thunked_fns.count; j++) {
+                if (strcmp(fn->fn_decl.fn_name, thunked_fns.items[j]) == 0) {
+                    needed = true;
+                    break;
+                }
+            }
+            if (!needed) continue;
 
             emit_thunk_evaluator(e, id, fn);
             emit_thunk_constructor(e, id, fn);
@@ -3581,6 +3705,7 @@ void c_emit(CEmitter *e, ASTNode *node) {
             id++;
         }
     }
+    da_free(&thunked_fns);
 
     /* Collect top-level executable statements */
     FnList top_stmts = {NULL, 0, 0};
