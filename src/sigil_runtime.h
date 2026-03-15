@@ -133,6 +133,25 @@ SigilMap *sigil_map_values(SigilMap *m);
 SigilMap *sigil_row(SigilVal first, int _repeats_count, SigilVal *_repeats_data);
 SigilMap *sigil_matrix(SigilVal first, int _repeats_count, SigilVal *_repeats_data);
 
+/* ── Dense Array Extraction / Reconstruction ─────────────────────── */
+/* Extract map<int,T> with keys 0..n-1 to contiguous int64_t array.
+ * Caller must free the returned pointer. */
+int64_t *sigil_map_to_flat_int(SigilMap *m, int64_t n);
+double  *sigil_map_to_flat_double(SigilMap *m, int64_t n);
+
+/* Extract map<int, map<int,T>> (matrix) to row-major flat array.
+ * Caller must free the returned pointer. */
+int64_t *sigil_map2d_to_flat_int(SigilMap *m, int64_t rows, int64_t cols);
+double  *sigil_map2d_to_flat_double(SigilMap *m, int64_t rows, int64_t cols);
+
+/* Reconstruct map<int,T> from contiguous array. */
+SigilMap *sigil_flat_to_map_int(int64_t *flat, int64_t n);
+SigilMap *sigil_flat_to_map_double(double *flat, int64_t n);
+
+/* Reconstruct map<int, map<int,T>> from row-major flat array. */
+SigilMap *sigil_flat_to_map2d_int(int64_t *flat, int64_t rows, int64_t cols);
+SigilMap *sigil_flat_to_map2d_double(double *flat, int64_t rows, int64_t cols);
+
 /* ── Type Conversions ────────────────────────────────────────────── */
 
 int64_t sigil_to_int(double v);

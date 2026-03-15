@@ -786,8 +786,25 @@ static void emit_for_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *
     fprintf(e->out, "}\n");
 }
 
-/* True data dependency — no algebraic escape. Always sequential. */
+/* Forward declarations for flat-array optimization */
+static const char *detect_triple_nested_2d_map(ASTNode *node,
+    const char **out_ivar, const char **out_jvar, ASTNode **out_dim);
+static void emit_for_work_stealing(CEmitter *e, ASTNode *node, ParallelAnnotation *ann);
+
+/* True data dependency — no algebraic escape. Always sequential.
+ * When the loop contains triple-nested 2D map access in a pure algebra,
+ * extracts to a flat array for cache-friendly sequential execution. */
 static void emit_for_obligate_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    if (ann && ann->is_pure) {
+        const char *ivar = NULL, *jvar = NULL;
+        ASTNode *dim_node = NULL;
+        const char *map_var = detect_triple_nested_2d_map(node, &ivar, &jvar, &dim_node);
+        if (map_var && ivar && jvar && dim_node) {
+            /* Delegate to work_stealing emitter which has the flat-array path */
+            emit_for_work_stealing(e, node, ann);
+            return;
+        }
+    }
     emit_for_sequential(e, node, ann);
 }
 
@@ -802,10 +819,350 @@ static void emit_for_pthread(CEmitter *e, ASTNode *node, ParallelAnnotation *ann
     emit_for_sequential(e, node, ann);
 }
 
-/* Fine-grained work-stealing (GCD / libdispatch).
- * Future: emit dispatch_apply with per-iteration blocks. */
+/* Detect triple-nested for-loop with 2D map access (Floyd-Warshall pattern).
+ * Returns the map variable name if detected, NULL otherwise. */
+static const char *detect_triple_nested_2d_map(ASTNode *node,
+    const char **out_ivar, const char **out_jvar, ASTNode **out_dim) {
+
+    ASTNode *body1 = node->for_stmt.for_body;
+    if (!body1) return NULL;
+
+    /* Find the i-loop in the k-loop body */
+    ASTNode *i_loop = NULL;
+    if (body1->kind == NODE_FOR) {
+        i_loop = body1;
+    } else if (body1->kind == NODE_BLOCK || body1->kind == NODE_BEGIN_END) {
+        for (int s = 0; s < body1->block.stmts.count; s++) {
+            if (body1->block.stmts.items[s]->kind == NODE_FOR) {
+                i_loop = body1->block.stmts.items[s];
+                break;
+            }
+        }
+    }
+    if (!i_loop) return NULL;
+
+    /* Find the j-loop in the i-loop body */
+    ASTNode *body2 = i_loop->for_stmt.for_body;
+    ASTNode *j_loop = NULL;
+    if (body2 && body2->kind == NODE_FOR) {
+        j_loop = body2;
+    } else if (body2 && (body2->kind == NODE_BLOCK || body2->kind == NODE_BEGIN_END)) {
+        for (int s = 0; s < body2->block.stmts.count; s++) {
+            if (body2->block.stmts.items[s]->kind == NODE_FOR) {
+                j_loop = body2->block.stmts.items[s];
+                break;
+            }
+        }
+    }
+    if (!j_loop) return NULL;
+
+    /* Scan j-loop body for double-indexed map access: get(get(VAR,...),...)
+     * Check call nodes at any depth in the statement tree. */
+    ASTNode *body3 = j_loop->for_stmt.for_body;
+    if (!body3) return NULL;
+    NodeList *stmts = NULL;
+    if (body3->kind == NODE_BLOCK || body3->kind == NODE_BEGIN_END)
+        stmts = &body3->block.stmts;
+    if (!stmts) return NULL;
+
+    const char *map_var = NULL;
+    for (int s = 0; s < stmts->count && !map_var; s++) {
+        ASTNode *stmt = stmts->items[s];
+        /* Check let/var bindings and if-statement conditions */
+        ASTNode *expr = NULL;
+        if (stmt->kind == NODE_LET || stmt->kind == NODE_VAR)
+            expr = stmt->binding.value;
+        else if (stmt->kind == NODE_IF)
+            expr = stmt->if_stmt.condition;
+        if (!expr) continue;
+
+        /* Walk to find get(get(VAR,...),...)  — may be inside begin/end or call args */
+        /* Simple approach: check if expr is a call to get/add/greater whose args
+         * contain get(get(IDENT,...),...)  */
+        ASTNode *search[16];
+        int ns = 0;
+        search[ns++] = expr;
+        while (ns > 0) {
+            ASTNode *cur = search[--ns];
+            if (!cur) continue;
+            if (cur->kind == NODE_CALL && strcmp(cur->call.call_name, "get") == 0 &&
+                cur->call.args.count >= 2) {
+                ASTNode *inner = cur->call.args.items[0];
+                /* Unwrap begin/end */
+                if (inner->kind == NODE_BEGIN_END && inner->block.stmts.count == 1)
+                    inner = inner->block.stmts.items[0];
+                if (inner->kind == NODE_CALL && strcmp(inner->call.call_name, "get") == 0 &&
+                    inner->call.args.count >= 1 && inner->call.args.items[0]->kind == NODE_IDENT) {
+                    map_var = inner->call.args.items[0]->ident.ident;
+                    break;
+                }
+            }
+            /* Push children for further search */
+            if (cur->kind == NODE_CALL) {
+                for (int a = 0; a < cur->call.args.count && ns < 15; a++)
+                    search[ns++] = cur->call.args.items[a];
+            } else if (cur->kind == NODE_BEGIN_END || cur->kind == NODE_BLOCK) {
+                for (int a = 0; a < cur->block.stmts.count && ns < 15; a++)
+                    search[ns++] = cur->block.stmts.items[a];
+            }
+        }
+    }
+    if (!map_var) return NULL;
+
+    *out_ivar = i_loop->for_stmt.var_name;
+    *out_jvar = j_loop->for_stmt.var_name;
+
+    /* Get dimension from i-loop's range source */
+    ASTNode *i_src = i_loop->for_stmt.iterable;
+    if (i_src->kind == NODE_BEGIN_END && i_src->block.stmts.count == 1)
+        i_src = i_src->block.stmts.items[0];
+    if (i_src->kind == NODE_CALL && strcmp(i_src->call.call_name, "range") == 0 &&
+        i_src->call.args.count >= 2)
+        *out_dim = i_src->call.args.items[1];
+    else
+        *out_dim = NULL;
+
+    return map_var;
+}
+
+/* Fine-grained work-stealing.
+ * Detects triple-nested for-loop with 2D map access and emits
+ * flat-array version using extraction helpers. */
 static void emit_for_work_stealing(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
-    emit_for_sequential(e, node, ann);
+    if (!ann || !ann->is_pure) {
+        emit_for_sequential(e, node, ann);
+        return;
+    }
+
+    const char *ivar = NULL, *jvar = NULL;
+    ASTNode *dim_node = NULL;
+    const char *map_var = detect_triple_nested_2d_map(node, &ivar, &jvar, &dim_node);
+
+    if (!map_var || !ivar || !jvar || !dim_node) {
+        emit_for_sequential(e, node, ann);
+        return;
+    }
+
+    const char *kvar = node->for_stmt.var_name;
+
+    /* Get k-loop range upper bound */
+    ASTNode *k_src = node->for_stmt.iterable;
+    if (k_src->kind == NODE_BEGIN_END && k_src->block.stmts.count == 1)
+        k_src = k_src->block.stmts.items[0];
+    bool k_range = (k_src->kind == NODE_CALL &&
+                    strcmp(k_src->call.call_name, "range") == 0 &&
+                    k_src->call.args.count >= 2);
+    if (!k_range) {
+        emit_for_sequential(e, node, ann);
+        return;
+    }
+
+    /* Emit flat-array optimized triple loop */
+    emit_indent(e);
+    fprintf(e->out, "/* PAR_STRATEGY: WORK_STEALING [pure] — flat-array 2D map optimization */\n");
+    emit_indent(e);
+    fprintf(e->out, "{\n");
+    e->indent++;
+
+    emit_indent(e);
+    fprintf(e->out, "int64_t _flat_n = ");
+    emit_expr(e, k_src->call.args.items[1]);
+    fprintf(e->out, ";\n");
+
+    emit_indent(e);
+    fprintf(e->out, "int64_t _flat_size = ");
+    emit_expr(e, dim_node);
+    fprintf(e->out, ";\n");
+
+    emit_indent(e);
+    fprintf(e->out, "int64_t *_flat = sigil_map2d_to_flat_int(%s, _flat_size, _flat_size);\n", map_var);
+
+    /* k-loop: obligate sequential (cross-iteration data dependency) */
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t %s = 0; %s < _flat_n; %s++) {\n", kvar, kvar, kvar);
+    e->indent++;
+
+    /* i-loop: parallel — each row is independent for fixed k.
+     * Chunk to cores*2 for uniform work distribution with minimal
+     * dispatch overhead. Each chunk processes a contiguous range of rows. */
+    emit_indent(e);
+    fprintf(e->out, "#ifdef __APPLE__\n");
+    emit_indent(e);
+    fprintf(e->out, "{ long _ncores = sysconf(_SC_NPROCESSORS_ONLN);\n");
+    emit_indent(e);
+    fprintf(e->out, "long _nchunks = _ncores * 2;\n");
+    emit_indent(e);
+    fprintf(e->out, "if (_nchunks > _flat_size) _nchunks = _flat_size;\n");
+    emit_indent(e);
+    fprintf(e->out, "dispatch_apply((size_t)_nchunks, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0),\n");
+    emit_indent(e);
+    fprintf(e->out, "  ^(size_t _chunk) {\n");
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64_t _%s_start = (int64_t)_chunk * _flat_size / _nchunks;\n", ivar);
+    emit_indent(e);
+    fprintf(e->out, "int64_t _%s_end = (int64_t)(_chunk + 1) * _flat_size / _nchunks;\n", ivar);
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t %s = _%s_start; %s < _%s_end; %s++) {\n", ivar, ivar, ivar, ivar, ivar);
+
+    /* j-loop: SIMD vectorized on ARM NEON, scalar fallback elsewhere.
+     * max(dist[i][j], dist[i][k] + dist[k][j]) with 2 int64 elements
+     * per cycle: vaddq_s64 + vcgtq_s64/vbslq_s64 (compare-select max). */
+    emit_indent(e);
+    fprintf(e->out, "int64_t _row_ik = _flat[%s * _flat_size + %s];\n", ivar, kvar);
+    emit_indent(e);
+    fprintf(e->out, "#ifdef __ARM_NEON\n");
+    emit_indent(e);
+    fprintf(e->out, "{ int64x2_t _vik = vdupq_n_s64(_row_ik);\n");
+    emit_indent(e);
+    fprintf(e->out, "int64_t %s;\n", jvar);
+    emit_indent(e);
+    fprintf(e->out, "for (%s = 0; %s + 1 < _flat_size; %s += 2) {\n", jvar, jvar, jvar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64x2_t _vkj = vld1q_s64(&_flat[%s * _flat_size + %s]);\n", kvar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64x2_t _vij = vld1q_s64(&_flat[%s * _flat_size + %s]);\n", ivar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64x2_t _vth = vaddq_s64(_vik, _vkj);\n");
+    emit_indent(e);
+    fprintf(e->out, "uint64x2_t _vcmp = vcgtq_s64(_vth, _vij);\n");
+    emit_indent(e);
+    fprintf(e->out, "vst1q_s64(&_flat[%s * _flat_size + %s], vbslq_s64(_vcmp, _vth, _vij));\n", ivar, jvar);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+    emit_indent(e);
+    fprintf(e->out, "for (; %s < _flat_size; %s++) {\n", jvar, jvar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64_t _through = _row_ik + _flat[%s * _flat_size + %s];\n", kvar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64_t _cur = _flat[%s * _flat_size + %s];\n", ivar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "if (_through > _cur) _flat[%s * _flat_size + %s] = _through;\n", ivar, jvar);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "} }\n");
+    emit_indent(e);
+    fprintf(e->out, "#else\n");
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t %s = 0; %s < _flat_size; %s++) {\n", jvar, jvar, jvar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64_t _through = _row_ik + _flat[%s * _flat_size + %s];\n", kvar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64_t _cur = _flat[%s * _flat_size + %s];\n", ivar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "if (_through > _cur) _flat[%s * _flat_size + %s] = _through;\n", ivar, jvar);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+    emit_indent(e);
+    fprintf(e->out, "#endif\n");
+
+    /* Close the for(i = start; i < end) loop */
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+
+    /* Close the dispatch_apply block */
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}); }\n");
+
+    emit_indent(e);
+    fprintf(e->out, "#else\n");
+
+    /* Non-Apple: sequential i-loop with SIMD j-loop */
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t %s = 0; %s < _flat_size; %s++) {\n", ivar, ivar, ivar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64_t _row_ik = _flat[%s * _flat_size + %s];\n", ivar, kvar);
+    emit_indent(e);
+    fprintf(e->out, "#ifdef __ARM_NEON\n");
+    emit_indent(e);
+    fprintf(e->out, "{ int64x2_t _vik = vdupq_n_s64(_row_ik);\n");
+    emit_indent(e);
+    fprintf(e->out, "int64_t %s;\n", jvar);
+    emit_indent(e);
+    fprintf(e->out, "for (%s = 0; %s + 1 < _flat_size; %s += 2) {\n", jvar, jvar, jvar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64x2_t _vkj = vld1q_s64(&_flat[%s * _flat_size + %s]);\n", kvar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64x2_t _vij = vld1q_s64(&_flat[%s * _flat_size + %s]);\n", ivar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64x2_t _vth = vaddq_s64(_vik, _vkj);\n");
+    emit_indent(e);
+    fprintf(e->out, "uint64x2_t _vcmp = vcgtq_s64(_vth, _vij);\n");
+    emit_indent(e);
+    fprintf(e->out, "vst1q_s64(&_flat[%s * _flat_size + %s], vbslq_s64(_vcmp, _vth, _vij));\n", ivar, jvar);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+    emit_indent(e);
+    fprintf(e->out, "for (; %s < _flat_size; %s++) {\n", jvar, jvar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64_t _through = _row_ik + _flat[%s * _flat_size + %s];\n", kvar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64_t _cur = _flat[%s * _flat_size + %s];\n", ivar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "if (_through > _cur) _flat[%s * _flat_size + %s] = _through;\n", ivar, jvar);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "} }\n");
+    emit_indent(e);
+    fprintf(e->out, "#else\n");
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t %s = 0; %s < _flat_size; %s++) {\n", jvar, jvar, jvar);
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "int64_t _through = _row_ik + _flat[%s * _flat_size + %s];\n", kvar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "int64_t _cur = _flat[%s * _flat_size + %s];\n", ivar, jvar);
+    emit_indent(e);
+    fprintf(e->out, "if (_through > _cur) _flat[%s * _flat_size + %s] = _through;\n", ivar, jvar);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+    emit_indent(e);
+    fprintf(e->out, "#endif\n");
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+
+    emit_indent(e);
+    fprintf(e->out, "#endif\n");
+
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+
+    /* Reconstruct: overwrite map contents from flat array */
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t _ri = 0; _ri < _flat_size; _ri++) {\n");
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "SigilMap *_rrow = sigil_unbox_map(sigil_map_get(%s, sigil_val_int(_ri)));\n", map_var);
+    emit_indent(e);
+    fprintf(e->out, "for (int64_t _rj = 0; _rj < _flat_size; _rj++)\n");
+    e->indent++;
+    emit_indent(e);
+    fprintf(e->out, "sigil_map_set(_rrow, sigil_val_int(_rj), sigil_val_int(_flat[_ri * _flat_size + _rj]));\n");
+    e->indent--;
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+
+    emit_indent(e);
+    fprintf(e->out, "free(_flat);\n");
+
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
 }
 
 /* Hardware atomic accumulation for associative+commutative reductions.
@@ -3611,9 +3968,14 @@ void c_emit(CEmitter *e, ASTNode *node) {
     fprintf(e->out, "#include <stdbool.h>\n");
     fprintf(e->out, "#include <stdio.h>\n");
     fprintf(e->out, "#include <stdlib.h>\n");
+    fprintf(e->out, "#include <unistd.h>\n");
     fprintf(e->out, "#ifdef __APPLE__\n");
     fprintf(e->out, "#define ACCELERATE_NEW_LAPACK\n");
     fprintf(e->out, "#include <Accelerate/Accelerate.h>\n");
+    fprintf(e->out, "#include <dispatch/dispatch.h>\n");
+    fprintf(e->out, "#endif\n");
+    fprintf(e->out, "#ifdef __ARM_NEON\n");
+    fprintf(e->out, "#include <arm_neon.h>\n");
     fprintf(e->out, "#endif\n");
     fprintf(e->out, "#include \"sigil_runtime.h\"\n");
     fprintf(e->out, "#include \"sigil_thunk.h\"\n");

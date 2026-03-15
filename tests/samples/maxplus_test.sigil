@@ -14,7 +14,7 @@ use MaxPlus
   rem   dist[i][j] = j - i    if j >= i (forward path length)
   rem   dist[i][j] = -inf     if j < i  (no backward path)
 
-  let N 300
+  let N 4800
 
   rem Build N x N adjacency matrix
   rem A[i][i] = 0, A[i][i+1] = 1, otherwise = -inf
@@ -38,17 +38,17 @@ use MaxPlus
   let dist (tropical_closure A N)
 
   rem ── Spot-check closure results ────────────────────────────────
-  rem dist[0][299] = 299 (full chain length)
-  print (get dist 0 299)
+  rem dist[0][4799] = 4799 (full chain length)
+  print (get dist 0 4799)
   rem dist[0][0] = 0
   print (get dist 0 0)
-  rem dist[299][0] = -inf (no backward path)
-  print (get dist 299 0)
+  rem dist[4799][0] = -inf (no backward path)
+  print (get dist 4799 0)
   rem dist[1][5] = 4
   print (get dist 1 5)
   rem ── Verification ──────────────────────────────────────────────
   var bad 0
-  if not (equal (get dist 0 299) 299) begin
+  if not (equal (get dist 0 4799) 4799) begin
     assign bad 1
   end
   if not (equal (get dist 0 0) 0) begin

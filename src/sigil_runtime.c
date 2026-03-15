@@ -306,6 +306,78 @@ void sigil_print_map(SigilMap *m) {
 int64_t sigil_to_int(double v) { return (int64_t)v; }
 double sigil_to_float(int64_t v) { return (double)v; }
 
+/* ── Dense Array Extraction / Reconstruction ─────────────────────── */
+
+int64_t *sigil_map_to_flat_int(SigilMap *m, int64_t n) {
+    int64_t *flat = (int64_t *)malloc(n * sizeof(int64_t));
+    for (int64_t i = 0; i < n; i++)
+        flat[i] = sigil_unbox_int(sigil_map_get(m, sigil_val_int(i)));
+    return flat;
+}
+
+double *sigil_map_to_flat_double(SigilMap *m, int64_t n) {
+    double *flat = (double *)malloc(n * sizeof(double));
+    for (int64_t i = 0; i < n; i++)
+        flat[i] = (double)sigil_unbox_int(sigil_map_get(m, sigil_val_int(i)));
+    return flat;
+}
+
+int64_t *sigil_map2d_to_flat_int(SigilMap *m, int64_t rows, int64_t cols) {
+    int64_t *flat = (int64_t *)malloc(rows * cols * sizeof(int64_t));
+    for (int64_t i = 0; i < rows; i++) {
+        SigilMap *row = sigil_unbox_map(sigil_map_get(m, sigil_val_int(i)));
+        for (int64_t j = 0; j < cols; j++)
+            flat[i * cols + j] = sigil_unbox_int(sigil_map_get(row, sigil_val_int(j)));
+    }
+    return flat;
+}
+
+double *sigil_map2d_to_flat_double(SigilMap *m, int64_t rows, int64_t cols) {
+    double *flat = (double *)malloc(rows * cols * sizeof(double));
+    for (int64_t i = 0; i < rows; i++) {
+        SigilMap *row = sigil_unbox_map(sigil_map_get(m, sigil_val_int(i)));
+        for (int64_t j = 0; j < cols; j++)
+            flat[i * cols + j] = (double)sigil_unbox_int(sigil_map_get(row, sigil_val_int(j)));
+    }
+    return flat;
+}
+
+SigilMap *sigil_flat_to_map_int(int64_t *flat, int64_t n) {
+    SigilMap *m = sigil_map_new();
+    for (int64_t i = 0; i < n; i++)
+        sigil_map_set(m, sigil_val_int(i), sigil_val_int(flat[i]));
+    return m;
+}
+
+SigilMap *sigil_flat_to_map_double(double *flat, int64_t n) {
+    SigilMap *m = sigil_map_new();
+    for (int64_t i = 0; i < n; i++)
+        sigil_map_set(m, sigil_val_int(i), sigil_val_int((int64_t)flat[i]));
+    return m;
+}
+
+SigilMap *sigil_flat_to_map2d_int(int64_t *flat, int64_t rows, int64_t cols) {
+    SigilMap *m = sigil_map_new();
+    for (int64_t i = 0; i < rows; i++) {
+        SigilMap *row = sigil_map_new();
+        for (int64_t j = 0; j < cols; j++)
+            sigil_map_set(row, sigil_val_int(j), sigil_val_int(flat[i * cols + j]));
+        sigil_map_set(m, sigil_val_int(i), sigil_val_map(row));
+    }
+    return m;
+}
+
+SigilMap *sigil_flat_to_map2d_double(double *flat, int64_t rows, int64_t cols) {
+    SigilMap *m = sigil_map_new();
+    for (int64_t i = 0; i < rows; i++) {
+        SigilMap *row = sigil_map_new();
+        for (int64_t j = 0; j < cols; j++)
+            sigil_map_set(row, sigil_val_int(j), sigil_val_int((int64_t)flat[i * cols + j]));
+        sigil_map_set(m, sigil_val_int(i), sigil_val_map(row));
+    }
+    return m;
+}
+
 SigilMap *sigil_int_to_string(int64_t v) {
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "%lld", (long long)v);

@@ -79,9 +79,27 @@ static void collect_writes(ASTNode *node, StrList *writes) {
             break;
         case NODE_CALL:
             if (strcmp(node->call.call_name, "set") == 0 && node->call.args.count >= 3) {
-                /* set target key val — target is being written */
-                if (node->call.args.items[0]->kind == NODE_IDENT)
-                    da_push(writes, node->call.args.items[0]->ident.ident);
+                /* set target key val — target is being written.
+                 * Follow get() chains to find the root variable:
+                 * set(get(get(dist, i), j), k, v) writes to dist. */
+                ASTNode *target = node->call.args.items[0];
+                while (target) {
+                    if (target->kind == NODE_IDENT) {
+                        da_push(writes, target->ident.ident);
+                        break;
+                    }
+                    if (target->kind == NODE_BEGIN_END && target->block.stmts.count == 1) {
+                        target = target->block.stmts.items[0];
+                        continue;
+                    }
+                    if (target->kind == NODE_CALL &&
+                        strcmp(target->call.call_name, "get") == 0 &&
+                        target->call.args.count >= 1) {
+                        target = target->call.args.items[0];
+                        continue;
+                    }
+                    break;
+                }
             }
             for (int i = 0; i < node->call.args.count; i++)
                 collect_writes(node->call.args.items[i], writes);
@@ -165,6 +183,78 @@ static bool str_in_list(const char *s, StrList *list) {
     return false;
 }
 
+/* Check if ALL set() calls that write to a given variable use the loop
+ * variable as the first index: set(get(VAR, LOOP_VAR), ...).
+ * If so, writes are partitioned by iteration and don't conflict. */
+static bool writes_are_loop_partitioned(ASTNode *body, const char *var_name,
+                                         const char *loop_var) {
+    if (!body) return true;
+    switch (body->kind) {
+        case NODE_CALL:
+            if (strcmp(body->call.call_name, "set") == 0 && body->call.args.count >= 3) {
+                /* Follow get() chain to find the root variable */
+                ASTNode *target = body->call.args.items[0];
+                const char *root_var = NULL;
+                const char *first_index = NULL;
+                while (target) {
+                    if (target->kind == NODE_IDENT) {
+                        root_var = target->ident.ident;
+                        break;
+                    }
+                    if (target->kind == NODE_BEGIN_END && target->block.stmts.count == 1) {
+                        target = target->block.stmts.items[0];
+                        continue;
+                    }
+                    if (target->kind == NODE_CALL &&
+                        strcmp(target->call.call_name, "get") == 0 &&
+                        target->call.args.count >= 2) {
+                        /* Record the index used at this level */
+                        ASTNode *idx = target->call.args.items[1];
+                        if (!first_index && idx->kind == NODE_IDENT)
+                            first_index = idx->ident.ident;
+                        target = target->call.args.items[0];
+                        continue;
+                    }
+                    break;
+                }
+                /* If this set writes to our variable, check the index */
+                if (root_var && strcmp(root_var, var_name) == 0) {
+                    if (!first_index || strcmp(first_index, loop_var) != 0)
+                        return false; /* Not indexed by loop var → not partitioned */
+                }
+            }
+            for (int i = 0; i < body->call.args.count; i++)
+                if (!writes_are_loop_partitioned(body->call.args.items[i], var_name, loop_var))
+                    return false;
+            break;
+        case NODE_BLOCK: case NODE_BEGIN_END:
+            for (int i = 0; i < body->block.stmts.count; i++)
+                if (!writes_are_loop_partitioned(body->block.stmts.items[i], var_name, loop_var))
+                    return false;
+            break;
+        case NODE_IF:
+            if (!writes_are_loop_partitioned(body->if_stmt.then_body, var_name, loop_var))
+                return false;
+            if (!writes_are_loop_partitioned(body->if_stmt.else_body, var_name, loop_var))
+                return false;
+            for (int i = 0; i < body->if_stmt.elifs.count; i++)
+                if (!writes_are_loop_partitioned(body->if_stmt.elifs.items[i], var_name, loop_var))
+                    return false;
+            break;
+        case NODE_FOR:
+            if (!writes_are_loop_partitioned(body->for_stmt.for_body, var_name, loop_var))
+                return false;
+            break;
+        case NODE_WHILE:
+            if (!writes_are_loop_partitioned(body->while_stmt.while_body, var_name, loop_var))
+                return false;
+            break;
+        default:
+            break;
+    }
+    return true;
+}
+
 /* Check if a for-loop body has cross-iteration write→read dependency.
  * Returns true if there IS a dependency (obligate sequential). */
 static bool has_cross_iteration_dependency(ASTNode *for_node) {
@@ -175,11 +265,17 @@ static bool has_cross_iteration_dependency(ASTNode *for_node) {
     collect_writes(for_node->for_stmt.for_body, &writes);
     collect_reads(for_node->for_stmt.for_body, &reads, for_node->for_stmt.var_name);
 
-    /* If any written variable is also read, and it's not the loop variable,
-     * there's a potential cross-iteration dependency. */
+    /* If any written variable is also read, check whether writes are
+     * partitioned by the loop variable (each iteration writes to a
+     * different index). If so, there's no cross-iteration conflict. */
     bool has_dep = false;
     for (int i = 0; i < writes.count; i++) {
         if (str_in_list(writes.items[i], &reads)) {
+            /* Check if writes to this variable are loop-partitioned */
+            if (writes_are_loop_partitioned(for_node->for_stmt.for_body,
+                    writes.items[i], for_node->for_stmt.var_name)) {
+                continue; /* Partitioned — no cross-iteration conflict */
+            }
             has_dep = true;
             break;
         }
