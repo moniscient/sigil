@@ -55,6 +55,10 @@ trait Associative T begin
   fn add T a T b returns T
 end
 
+trait Commutative T begin
+  fn add T a T b returns T
+end
+
 trait Idempotent T begin
   fn add T a T b returns T
 end
@@ -91,6 +95,17 @@ implement Associative for int begin
     end
     return b
   end
+  fn multiply int a int b returns int
+end
+
+implement Commutative for int begin
+  fn add int a int b returns int begin
+    if greater a b begin
+      return a
+    end
+    return b
+  end
+  fn multiply int a int b returns int
 end
 
 implement Idempotent for int begin
@@ -101,6 +116,20 @@ implement Idempotent for int begin
     return b
   end
 end
+
+rem ── Functor: element-wise mapping over collections ──────────────
+
+implement Functor for map begin
+  fn map map m int f returns map begin
+    var result mapnew
+    for k in m begin
+      set result k do invoke f do get m k end end
+    end
+    return result
+  end
+end
+
+implement Map for tropical_map_elements begin end
 
 rem ── Sigil bindings ─────────────────────────────────────────────
 
@@ -140,32 +169,50 @@ fn tropical_one returns int begin
   return 0
 end
 
+rem ── Element-wise operations (comprehension-based) ───────────────
+rem Independent per-element computation; pure algebra enables
+rem PAR_SIMD strategy selection for these comprehensions.
+
+rem Element-wise map: apply f to every element of a vector
+fn tropical_map_elements map v int f int size returns map begin
+  return do collect from i in range 0 size apply invoke f do get v i end end
+end
+
+rem Element-wise tropical vector addition (max of corresponding elements)
+fn tropical_vec_add map a map b int size returns map begin
+  return do collect from i in range 0 size apply add do get a i end do get b i end end
+end
+
 rem ── Derived operations ─────────────────────────────────────────
 
-rem Tropical matrix-vector "multiply":
+rem Tropical row inner product: max over j of (row[j] + v[j])
+rem Written as: assign best add(best, candidate)
+rem where tropical add = max. This pattern is detected as a reduction
+rem over "add", which has Associative + Commutative + Idempotent traits.
+rem With pure algebra, qualifies for PAR_GPU strategy.
+fn tropical_dot_row map row map v int cols returns int begin
+  var best do negate 999999999 end
+  for j in range 0 cols begin
+    let candidate do multiply do get row j end do get v j end end
+    assign best add best candidate
+  end
+  return best
+end
+
+rem Tropical matrix-vector "multiply" using comprehension:
 rem   result[i] = max_j ( A[i][j] + v[j] )
-rem This is the core operation for longest-path / scheduling.
+rem Each row's result is independent → PAR_SIMD comprehension.
 fn tropical_matvec map a map v returns map begin
   let rows do length a end
-  var result mapnew
-  for i in range 0 rows begin
-    var best do negate 999999999 end
-    let row_i do get a i end
-    let cols do length row_i end
-    for j in range 0 cols begin
-      let candidate do add do get row_i j end do get v j end end
-      if greater candidate best begin
-        assign best candidate
-      end
-    end
-    set result i best
-  end
-  return result
+  return do collect from i in range 0 rows apply tropical_dot_row do get a i end v do length do get a i end end end
 end
 
 rem Kleene star approximation: iterate A^0 + A^1 + ... + A^(n-1)
 rem where + is tropical add (max) and * is tropical multiply (sum).
 rem Computes all-pairs longest paths in n iterations.
+rem The outer k-loop is obligate sequential (each iteration reads
+rem results from the previous). The inner i,j loops are independent
+rem for fixed k and annotated accordingly by the mechanism selector.
 fn tropical_closure map a int n returns map begin
   let size do length a end
   var dist do clone a end

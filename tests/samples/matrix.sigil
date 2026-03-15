@@ -1,6 +1,71 @@
 algebra MatrixArithmetic
 
-rem Primitive sugar: bind sigils to built-in keywords
+pure
+
+rem ── Trait declarations ──────────────────────────────────────────
+
+trait Addable T begin
+  fn add T a T b returns T
+  requires identity add
+end
+
+trait Multipliable T begin
+  fn times T a T b returns T
+  requires identity times
+end
+
+trait Associative T begin
+  fn add T a T b returns T
+end
+
+trait Commutative T begin
+  fn add T a T b returns T
+end
+
+rem ── Trait implementations ───────────────────────────────────────
+
+implement Addable for int begin
+  fn add int a int b returns int begin
+    return do add a b end
+  end
+  identity add 0
+end
+
+implement Multipliable for int begin
+  fn times int a int b returns int begin
+    return do times a b end
+  end
+  identity times 1
+end
+
+implement Associative for int begin
+  fn add int a int b returns int
+  fn times int a int b returns int
+end
+
+implement Commutative for int begin
+  fn add int a int b returns int
+  fn times int a int b returns int
+end
+
+distributive times over add
+
+rem ── Functor: element-wise mapping over collections ──────────────
+
+implement Functor for map begin
+  fn map map m int f returns map begin
+    var result mapnew
+    for k in m begin
+      set result k do invoke f do get m k end end
+    end
+    return result
+  end
+end
+
+implement Map for map_elements begin end
+
+rem ── Primitive sugar: sigil bindings ────────────────────────────
+
 fn add int a + int b returns int
 fn times int a * int b returns int
 fn subtract int a - int b returns int
@@ -8,26 +73,52 @@ fn get map m [ int i , int j ] returns int
 fn set map m [ int i , int j ] = int v returns void
 fn range int a .. int b returns iter
 
-rem Span: nullary sigil that expands to the full range of a dimension
-rem span requires context passing, disabled for now
-rem fn span * returns iter begin
-rem   return do range 0 do length context end end
-rem end
-
 rem Matrix literal sugar: row and matrix constructors via repeats
 fn row [ int a , repeats ] returns map
 fn matrix [ map a ; repeats ] returns map
 
-rem Dot product: sum of element-wise products across a shared dimension
+rem ── Element-wise operations (comprehension-based) ──────────────
+rem Each element is computed independently; the mechanism selector
+rem can choose PAR_SIMD (pure + no filter) for these comprehensions.
+
+rem Element-wise map: apply f to every element of a flat collection
+fn map_elements map m int f int size returns map begin
+  return do collect from i in range 0 size apply invoke f do get m i end end
+end
+
+rem Helper: add elements from two matrices at position (i,j)
+fn elem_add map a map b int i int j returns int begin
+  return do add do get do get a i end j end do get do get b i end j end end
+end
+
+rem Matrix element-wise addition: independent per-element comprehension
+fn matrix_add map a map b int rows int cols returns map begin
+  return do collect from i in range 0 rows apply collect from j in range 0 cols apply elem_add a b i j end
+end
+
+rem Scalar-matrix multiply: scale every element independently
+fn scalar_mul int s map m int rows int cols returns map begin
+  return do collect from i in range 0 rows apply collect from j in range 0 cols apply times s do get do get m i end j end end
+end
+
+rem ── Dot product: reduction over shared dimension ────────────────
+rem The mechanism selector detects the accumulator pattern:
+rem   assign acc add(acc, ...)
+rem With Associative + Commutative add and identity 0,
+rem this qualifies for PAR_ATOMIC_REDUCTION.
+
 fn dot map a int row map b int col int n returns int begin
   var acc 0
   for k in do range 0 n end begin
-    assign acc do add acc do times do get a row k end do get b k col end end end
+    assign acc add acc do times do get a row k end do get b k col end end
   end
   return acc
 end
 
-rem Matrix multiply: comprehension over row/col pairs
+rem ── Matrix multiply: comprehension over row/col pairs ───────────
+rem Each (i,j) entry is an independent dot product.
+rem Both comprehension levels are embarrassingly parallel (PAR_SIMD).
+
 fn multiply map a @ map b returns map begin
   let rows do length a end
   let cols do length do get b 0 end end

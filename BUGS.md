@@ -44,4 +44,4 @@
 
 ---
 
-Next valid BUG ID: BUG-012
+Next valid BUG ID: BUG-013

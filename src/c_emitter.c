@@ -713,6 +713,315 @@ static bool type_has_trait(CEmitter *e, const char *type_name, const char *trait
     return trait_find_impl(e->traits, trait_name, type_name) != NULL;
 }
 
+/* ── Strategy Dispatch: For-Loop Emission ────────────────────────── */
+/*
+ * Each strategy function receives the full ParallelAnnotation context
+ * and emits C code for the for-loop.  All currently emit identical
+ * sequential code.  To implement a strategy, replace the body of its
+ * function — no other strategy function needs to change.
+ */
+
+/* Shared sequential implementation used by all strategy functions. */
+static void emit_for_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    if (ann) {
+        emit_indent(e);
+        fprintf(e->out, "/* PAR_STRATEGY: %s", parallel_strategy_name(ann->strategy));
+        if (ann->reduction_fn)
+            fprintf(e->out, " (reduction over \"%s\")", ann->reduction_fn);
+        if (ann->is_pure)
+            fprintf(e->out, " [pure]");
+        fprintf(e->out, " */\n");
+    }
+    emit_indent(e);
+    fprintf(e->out, "{\n");
+    e->indent++;
+    emit_indent(e);
+    {
+        TypeRef *iter_type = infer_expr_type(e, node->for_stmt.iterable);
+        ASTNode *iter_inner = node->for_stmt.iterable;
+        if (iter_inner->kind == NODE_BEGIN_END && iter_inner->block.stmts.count == 1)
+            iter_inner = iter_inner->block.stmts.items[0];
+        bool is_range = (iter_inner->kind == NODE_CALL &&
+                         strcmp(iter_inner->call.call_name, "range") == 0);
+        if (is_range) {
+            fprintf(e->out, "SigilIter _it = sigil_range(");
+            if (iter_inner->call.args.count >= 2) {
+                emit_expr(e, iter_inner->call.args.items[0]);
+                fprintf(e->out, ", ");
+                emit_expr(e, iter_inner->call.args.items[1]);
+            }
+            fprintf(e->out, ");\n");
+        } else if (iter_type && iter_type->kind == TYPE_MAP) {
+            fprintf(e->out, "SigilIter _it = sigil_map_iter(");
+            emit_expr(e, node->for_stmt.iterable);
+            fprintf(e->out, ");\n");
+        } else {
+            fprintf(e->out, "SigilIter _it = ");
+            emit_expr(e, node->for_stmt.iterable);
+            fprintf(e->out, ";\n");
+        }
+        emit_indent(e);
+        fprintf(e->out, "while (sigil_iter_has_next(&_it)) {\n");
+        e->indent++;
+        emit_indent(e);
+        if (is_range) {
+            fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_it));\n",
+                    node->for_stmt.var_name);
+        } else if (iter_type && iter_type->kind == TYPE_MAP && iter_type->key_type) {
+            emit_c_type(e, iter_type->key_type);
+            fprintf(e->out, " %s = ", node->for_stmt.var_name);
+            emit_unbox_prefix(e, iter_type->key_type);
+            fprintf(e->out, "sigil_iter_next(&_it));\n");
+        } else {
+            fprintf(e->out, "SigilVal %s = sigil_iter_next(&_it);\n",
+                    node->for_stmt.var_name);
+        }
+    }
+    emit_body(e, node->for_stmt.for_body);
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+    e->indent--;
+    emit_indent(e);
+    fprintf(e->out, "}\n");
+}
+
+/* True data dependency — no algebraic escape. Always sequential. */
+static void emit_for_obligate_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Parallelizable but below cost threshold. Sequential is optimal. */
+static void emit_for_optimal_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Coarse-grained OS thread parallelism.
+ * Future: emit pthread_create per chunk, join after loop. */
+static void emit_for_pthread(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Fine-grained work-stealing (GCD / libdispatch).
+ * Future: emit dispatch_apply with per-iteration blocks. */
+static void emit_for_work_stealing(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Hardware atomic accumulation for associative+commutative reductions.
+ * Future: emit __atomic_fetch_add / __atomic_fetch_or per iteration.
+ * ann->reduction_fn: the combining function (e.g. "add")
+ * ann->identity_value: initial accumulator value */
+static void emit_for_atomic_reduction(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Blelloch-style parallel prefix scan.
+ * Future: emit two-pass up-sweep/down-sweep over shared array.
+ * ann->reduction_fn: the associative combining function */
+static void emit_for_parallel_prefix(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* ARM NEON vectorized loop.
+ * Future: emit vld1q / vadd / vmul intrinsics with scalar tail. */
+static void emit_for_simd(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Apple AMX matrix coprocessor.
+ * Future: emit AMX load/fma/store blocks for tiled matrix ops.
+ * Requires distributive(multiply, add) in the enclosing algebra. */
+static void emit_for_amx(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Metal compute shader dispatch.
+ * Future: emit MTLComputePipelineState setup, encode, commit, waitUntilCompleted.
+ * ann->is_pure must be true; ann->identity_value used for reduction init. */
+static void emit_for_gpu(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Streaming producer-consumer pipeline.
+ * Future: emit ring-buffer with producer/consumer threads. */
+static void emit_for_pipeline(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Branch speculation.
+ * Future: emit speculative execution with rollback on misprediction. */
+static void emit_for_speculative(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_for_sequential(e, node, ann);
+}
+
+/* Dispatch a for-loop to its strategy-specific emitter. */
+static void emit_for_dispatched(CEmitter *e, ASTNode *node) {
+    ParallelAnnotation *ann = (ParallelAnnotation *)node->parallel;
+    ParallelStrategy strategy = ann ? ann->strategy : PAR_OBLIGATE_SEQUENTIAL;
+
+    switch (strategy) {
+        case PAR_OBLIGATE_SEQUENTIAL: emit_for_obligate_sequential(e, node, ann); break;
+        case PAR_OPTIMAL_SEQUENTIAL:  emit_for_optimal_sequential(e, node, ann);  break;
+        case PAR_PTHREAD:             emit_for_pthread(e, node, ann);             break;
+        case PAR_WORK_STEALING:       emit_for_work_stealing(e, node, ann);       break;
+        case PAR_ATOMIC_REDUCTION:    emit_for_atomic_reduction(e, node, ann);    break;
+        case PAR_PARALLEL_PREFIX:     emit_for_parallel_prefix(e, node, ann);     break;
+        case PAR_SIMD:                emit_for_simd(e, node, ann);                break;
+        case PAR_AMX:                 emit_for_amx(e, node, ann);                 break;
+        case PAR_GPU:                 emit_for_gpu(e, node, ann);                 break;
+        case PAR_PIPELINE:            emit_for_pipeline(e, node, ann);            break;
+        case PAR_SPECULATIVE:         emit_for_speculative(e, node, ann);         break;
+    }
+}
+
+/* ── Strategy Dispatch: Comprehension Emission ───────────────────── */
+/*
+ * Same pattern as for-loops: each strategy gets its own function,
+ * all currently emitting identical sequential comprehension code.
+ */
+
+/* Shared sequential comprehension implementation. */
+static void emit_comp_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    if (ann) {
+        fprintf(e->out, "/* PAR_STRATEGY: %s", parallel_strategy_name(ann->strategy));
+        if (ann->is_pure) fprintf(e->out, " [pure]");
+        fprintf(e->out, " */ ");
+    }
+    fprintf(e->out, "({ SigilMap *_comp_result = sigil_map_new();\n");
+
+    TypeRef *src_type = infer_expr_type(e, node->comprehension.comp_source);
+    ASTNode *src = node->comprehension.comp_source;
+    bool is_range = (src->kind == NODE_CALL && strcmp(src->call.call_name, "range") == 0);
+
+    if (is_range) {
+        fprintf(e->out, "SigilIter _comp_it = sigil_range(");
+        if (src->call.args.count >= 2) {
+            emit_expr(e, src->call.args.items[0]);
+            fprintf(e->out, ", ");
+            emit_expr(e, src->call.args.items[1]);
+        }
+        fprintf(e->out, ");\n");
+    } else if (src_type && (src_type->kind == TYPE_MAP || src_type->kind == TYPE_NAMED)) {
+        const char *type_name = NULL;
+        if (src_type->kind == TYPE_NAMED) type_name = src_type->name;
+        else type_name = "map";
+
+        bool is_assoc = type_has_trait(e, type_name, "Associative");
+        (void)is_assoc; /* Reserved for future key-preserving semantics */
+
+        fprintf(e->out, "SigilIter _comp_it = sigil_map_iter(");
+        emit_expr(e, src);
+        fprintf(e->out, ");\n");
+    } else {
+        fprintf(e->out, "SigilIter _comp_it = ");
+        emit_expr(e, src);
+        fprintf(e->out, ";\n");
+    }
+
+    fprintf(e->out, "int64_t _comp_idx = 0;\n");
+    fprintf(e->out, "while (sigil_iter_has_next(&_comp_it)) {\n");
+
+    if (is_range) {
+        fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_comp_it));\n",
+                node->comprehension.comp_var);
+    } else if (src_type && src_type->kind == TYPE_MAP && src_type->key_type) {
+        emit_c_type(e, src_type->key_type);
+        fprintf(e->out, " %s = ", node->comprehension.comp_var);
+        emit_unbox_prefix(e, src_type->key_type);
+        fprintf(e->out, "sigil_iter_next(&_comp_it));\n");
+    } else {
+        fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_comp_it));\n",
+                node->comprehension.comp_var);
+    }
+
+    if (node->comprehension.comp_filter) {
+        fprintf(e->out, "if (!(");
+        emit_expr(e, node->comprehension.comp_filter);
+        fprintf(e->out, ")) continue;\n");
+    }
+
+    fprintf(e->out, "sigil_map_set(_comp_result, sigil_val_int(_comp_idx), ");
+    emit_boxed(e, node->comprehension.comp_transform);
+    fprintf(e->out, ");\n");
+    fprintf(e->out, "_comp_idx++;\n");
+    fprintf(e->out, "}\n");
+    fprintf(e->out, "_comp_result; })");
+}
+
+static void emit_comp_obligate_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+static void emit_comp_optimal_sequential(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit pthread_create per chunk, collect results into output map. */
+static void emit_comp_pthread(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit dispatch_apply with per-element transform blocks. */
+static void emit_comp_work_stealing(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit atomic scatter into pre-allocated result array. */
+static void emit_comp_atomic_reduction(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit parallel prefix with index computation. */
+static void emit_comp_parallel_prefix(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit NEON vectorized transform with scalar tail. */
+static void emit_comp_simd(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit AMX tiled transform for matrix element operations. */
+static void emit_comp_amx(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit Metal compute kernel for massively parallel transform. */
+static void emit_comp_gpu(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit pipelined producer-consumer with bounded buffer. */
+static void emit_comp_pipeline(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Future: emit speculative parallel transform with validation. */
+static void emit_comp_speculative(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
+    emit_comp_sequential(e, node, ann);
+}
+
+/* Dispatch a comprehension to its strategy-specific emitter. */
+static void emit_comp_dispatched(CEmitter *e, ASTNode *node) {
+    ParallelAnnotation *ann = (ParallelAnnotation *)node->parallel;
+    ParallelStrategy strategy = ann ? ann->strategy : PAR_OBLIGATE_SEQUENTIAL;
+
+    switch (strategy) {
+        case PAR_OBLIGATE_SEQUENTIAL: emit_comp_obligate_sequential(e, node, ann); break;
+        case PAR_OPTIMAL_SEQUENTIAL:  emit_comp_optimal_sequential(e, node, ann);  break;
+        case PAR_PTHREAD:             emit_comp_pthread(e, node, ann);             break;
+        case PAR_WORK_STEALING:       emit_comp_work_stealing(e, node, ann);       break;
+        case PAR_ATOMIC_REDUCTION:    emit_comp_atomic_reduction(e, node, ann);    break;
+        case PAR_PARALLEL_PREFIX:     emit_comp_parallel_prefix(e, node, ann);     break;
+        case PAR_SIMD:                emit_comp_simd(e, node, ann);                break;
+        case PAR_AMX:                 emit_comp_amx(e, node, ann);                 break;
+        case PAR_GPU:                 emit_comp_gpu(e, node, ann);                 break;
+        case PAR_PIPELINE:            emit_comp_pipeline(e, node, ann);            break;
+        case PAR_SPECULATIVE:         emit_comp_speculative(e, node, ann);         break;
+    }
+}
+
 /* ── Expression Emission ─────────────────────────────────────────── */
 
 static void emit_expr(CEmitter *e, ASTNode *node) {
@@ -1472,82 +1781,9 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
             break;
         }
 
-        case NODE_COMPREHENSION: {
-            if (node->parallel) {
-                ParallelAnnotation *ann = (ParallelAnnotation *)node->parallel;
-                fprintf(e->out, "/* PAR_STRATEGY: %s", parallel_strategy_name(ann->strategy));
-                if (ann->is_pure) fprintf(e->out, " [pure]");
-                fprintf(e->out, " */ ");
-            }
-            /* Emit as GCC statement expression */
-            fprintf(e->out, "({ SigilMap *_comp_result = sigil_map_new();\n");
-
-            /* Determine source type for iteration */
-            TypeRef *src_type = infer_expr_type(e, node->comprehension.comp_source);
-
-            /* Check if source is a range call */
-            ASTNode *src = node->comprehension.comp_source;
-            bool is_range = (src->kind == NODE_CALL && strcmp(src->call.call_name, "range") == 0);
-
-            if (is_range) {
-                fprintf(e->out, "SigilIter _comp_it = sigil_range(");
-                if (src->call.args.count >= 2) {
-                    emit_expr(e, src->call.args.items[0]);
-                    fprintf(e->out, ", ");
-                    emit_expr(e, src->call.args.items[1]);
-                }
-                fprintf(e->out, ");\n");
-            } else if (src_type && (src_type->kind == TYPE_MAP || src_type->kind == TYPE_NAMED)) {
-                /* Check for Associative trait */
-                const char *type_name = NULL;
-                if (src_type->kind == TYPE_NAMED) type_name = src_type->name;
-                else type_name = "map";
-
-                bool is_assoc = type_has_trait(e, type_name, "Associative");
-                (void)is_assoc; /* Used for future key-preserving semantics */
-
-                fprintf(e->out, "SigilIter _comp_it = sigil_map_iter(");
-                emit_expr(e, src);
-                fprintf(e->out, ");\n");
-            } else {
-                fprintf(e->out, "SigilIter _comp_it = ");
-                emit_expr(e, src);
-                fprintf(e->out, ";\n");
-            }
-
-            fprintf(e->out, "int64_t _comp_idx = 0;\n");
-            fprintf(e->out, "while (sigil_iter_has_next(&_comp_it)) {\n");
-
-            /* Bind iteration variable */
-            if (is_range) {
-                fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_comp_it));\n",
-                        node->comprehension.comp_var);
-            } else if (src_type && src_type->kind == TYPE_MAP && src_type->key_type) {
-                emit_c_type(e, src_type->key_type);
-                fprintf(e->out, " %s = ", node->comprehension.comp_var);
-                emit_unbox_prefix(e, src_type->key_type);
-                fprintf(e->out, "sigil_iter_next(&_comp_it));\n");
-            } else {
-                fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_comp_it));\n",
-                        node->comprehension.comp_var);
-            }
-
-            /* Filter */
-            if (node->comprehension.comp_filter) {
-                fprintf(e->out, "if (!(");
-                emit_expr(e, node->comprehension.comp_filter);
-                fprintf(e->out, ")) continue;\n");
-            }
-
-            /* Transform and store */
-            fprintf(e->out, "sigil_map_set(_comp_result, sigil_val_int(_comp_idx), ");
-            emit_boxed(e, node->comprehension.comp_transform);
-            fprintf(e->out, ");\n");
-            fprintf(e->out, "_comp_idx++;\n");
-            fprintf(e->out, "}\n");
-            fprintf(e->out, "_comp_result; })");
+        case NODE_COMPREHENSION:
+            emit_comp_dispatched(e, node);
             break;
-        }
 
         default:
             fprintf(e->out, "/* <unsupported expr %d> */0", node->kind);
@@ -1650,70 +1886,7 @@ static void emit_stmt(CEmitter *e, ASTNode *node) {
             break;
 
         case NODE_FOR:
-            if (node->parallel) {
-                ParallelAnnotation *ann = (ParallelAnnotation *)node->parallel;
-                emit_indent(e);
-                fprintf(e->out, "/* PAR_STRATEGY: %s", parallel_strategy_name(ann->strategy));
-                if (ann->reduction_fn)
-                    fprintf(e->out, " (reduction over \"%s\")", ann->reduction_fn);
-                if (ann->is_pure)
-                    fprintf(e->out, " [pure]");
-                fprintf(e->out, " */\n");
-            }
-            emit_indent(e);
-            fprintf(e->out, "{\n");
-            e->indent++;
-            emit_indent(e);
-            {
-                TypeRef *iter_type = infer_expr_type(e, node->for_stmt.iterable);
-                /* Detect range call (may be wrapped in begin/end) */
-                ASTNode *iter_inner = node->for_stmt.iterable;
-                if (iter_inner->kind == NODE_BEGIN_END && iter_inner->block.stmts.count == 1)
-                    iter_inner = iter_inner->block.stmts.items[0];
-                bool is_range = (iter_inner->kind == NODE_CALL &&
-                                 strcmp(iter_inner->call.call_name, "range") == 0);
-                if (is_range) {
-                    fprintf(e->out, "SigilIter _it = sigil_range(");
-                    if (iter_inner->call.args.count >= 2) {
-                        emit_expr(e, iter_inner->call.args.items[0]);
-                        fprintf(e->out, ", ");
-                        emit_expr(e, iter_inner->call.args.items[1]);
-                    }
-                    fprintf(e->out, ");\n");
-                } else if (iter_type && iter_type->kind == TYPE_MAP) {
-                    fprintf(e->out, "SigilIter _it = sigil_map_iter(");
-                    emit_expr(e, node->for_stmt.iterable);
-                    fprintf(e->out, ");\n");
-                } else {
-                    fprintf(e->out, "SigilIter _it = ");
-                    emit_expr(e, node->for_stmt.iterable);
-                    fprintf(e->out, ";\n");
-                }
-                emit_indent(e);
-                fprintf(e->out, "while (sigil_iter_has_next(&_it)) {\n");
-                e->indent++;
-                emit_indent(e);
-                /* Auto-unbox: determine element type */
-                if (is_range) {
-                    fprintf(e->out, "int64_t %s = sigil_unbox_int(sigil_iter_next(&_it));\n",
-                            node->for_stmt.var_name);
-                } else if (iter_type && iter_type->kind == TYPE_MAP && iter_type->key_type) {
-                    emit_c_type(e, iter_type->key_type);
-                    fprintf(e->out, " %s = ", node->for_stmt.var_name);
-                    emit_unbox_prefix(e, iter_type->key_type);
-                    fprintf(e->out, "sigil_iter_next(&_it));\n");
-                } else {
-                    fprintf(e->out, "SigilVal %s = sigil_iter_next(&_it);\n",
-                            node->for_stmt.var_name);
-                }
-            }
-            emit_body(e, node->for_stmt.for_body);
-            e->indent--;
-            emit_indent(e);
-            fprintf(e->out, "}\n");
-            e->indent--;
-            emit_indent(e);
-            fprintf(e->out, "}\n");
+            emit_for_dispatched(e, node);
             break;
 
         case NODE_MATCH:

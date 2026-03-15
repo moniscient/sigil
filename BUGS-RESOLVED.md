@@ -153,3 +153,14 @@ And `TYPE_NAMED` fell through to the `default: sigil_print_int` case.
 - **Status**: Fixed (2026-03-09)
 
 ---
+
+### BUG-012: Mechanism selector does not annotate comprehensions inside return statements
+- **Discovered**: 2026-03-14, during matrix/max_plus trait update
+- **Category**: Codegen
+- **Severity**: Medium
+- **Description**: `select_node` in `parallel.c` had no cases for `NODE_RETURN`, `NODE_LET`, `NODE_VAR`, `NODE_ASSIGN`, or `NODE_CALL`. These fell to `default: break` without recursing into child expressions. Comprehensions and for-loops nested inside return values, let/var bindings, assignments, or call arguments were never visited by the mechanism selector.
+- **Fix**: Added cases for `NODE_RETURN` (recurse into value), `NODE_LET`/`NODE_VAR` (recurse into binding value), `NODE_ASSIGN` (recurse into assigned value), and `NODE_CALL` (recurse into all args).
+- **Files**: `src/parallel.c` (`select_node` function)
+- **Status**: Fixed (2026-03-14)
+
+---

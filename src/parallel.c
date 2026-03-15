@@ -489,6 +489,24 @@ static void select_node(MechanismSelector *ms, ASTNode *node) {
             select_node(ms, node->lambda.lambda_body);
             break;
 
+        case NODE_RETURN:
+            select_node(ms, node->ret.value);
+            break;
+
+        case NODE_LET:
+        case NODE_VAR:
+            select_node(ms, node->binding.value);
+            break;
+
+        case NODE_ASSIGN:
+            select_node(ms, node->assign.value);
+            break;
+
+        case NODE_CALL:
+            for (int i = 0; i < node->call.args.count; i++)
+                select_node(ms, node->call.args.items[i]);
+            break;
+
         default:
             break;
     }
