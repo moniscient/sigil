@@ -10,6 +10,7 @@
 #include "skw_emitter.h"
 #include "c_emitter.h"
 #include "parallel.h"
+#include "builtins.h"
 #include "errors.h"
 
 static char *read_file(const char *path) {
@@ -120,6 +121,7 @@ int main(int argc, char **argv) {
     /* Initialize trait registry before desugaring (needed for chain grouping) */
     TraitRegistry trait_reg;
     trait_registry_init(&trait_reg, &arena, &intern_tab, &errors);
+    register_builtin_traits(&trait_reg, &arena, &intern_tab);
 
     if (!is_skw) {
         Desugarer desugarer;

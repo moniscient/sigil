@@ -771,9 +771,20 @@ static void emit_expr(CEmitter *e, ASTNode *node) {
             }
             break;
 
-        case NODE_CHAIN:
-            emit_expr(e, chain_to_calls(e->arena, node));
+        case NODE_CHAIN: {
+            /* Bind trait guard: chains of bind operations are always
+             * sequential, even if the function also has Associative. */
+            bool is_bind = type_has_trait(e, node->chain.chain_fn_name, "Bind");
+            bool is_assoc = type_has_trait(e, node->chain.chain_fn_name, "Associative");
+            if (is_assoc && !is_bind) {
+                /* Parallel chain emission (reserved for future implementation) */
+                emit_expr(e, chain_to_calls(e->arena, node));
+            } else {
+                /* Sequential: left-fold into nested calls */
+                emit_expr(e, chain_to_calls(e->arena, node));
+            }
             break;
+        }
 
         case NODE_CALL: {
             /* UDT constructor */

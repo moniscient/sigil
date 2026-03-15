@@ -1,0 +1,99 @@
+rem Maybe Monad — specification example for Functor/Applicative/Monad traits
+rem
+rem Demonstrates:
+rem   - type-level traits: Functor, Applicative, Monad with prerequisite chain
+rem   - function marker traits: Bind, Unit, Map
+rem   - bind sigil >>= with chaining in a use block
+
+algebra MaybeMonad
+
+rem Maybe type: present=1 means Just(val), present=0 means Nothing
+type Maybe int present int val
+
+rem Unit: wrap a plain value into Maybe (Just constructor)
+fn unit int x returns Maybe
+  begin
+    return Maybe 1 x
+  end
+
+rem Nothing constructor
+fn nothing returns Maybe
+  begin
+    return Maybe 0 0
+  end
+
+rem Bind: chain Maybe computations, short-circuit on Nothing
+rem Infix sigil >>= for monadic sequencing
+fn mbind Maybe m >>= int f returns Maybe
+  begin
+    if equal get m present 0 begin
+      return nothing
+    end
+    return invoke f get m val
+  end
+
+rem Map: apply a plain function over Maybe contents
+fn maybe_map Maybe m int f returns Maybe
+  begin
+    if equal get m present 0 begin
+      return nothing
+    end
+    return unit invoke f get m val
+  end
+
+rem Ap: apply a Maybe-wrapped function to a Maybe value
+fn maybe_ap Maybe mf Maybe mx returns Maybe
+  begin
+    if equal get mf present 0 begin
+      return nothing
+    end
+    return maybe_map mx get mf val
+  end
+
+rem Trait hierarchy implementations for Maybe
+
+implement Functor for Maybe
+  begin
+    fn map Maybe m int f returns Maybe
+      begin
+        if equal get m present 0 begin
+          return nothing
+        end
+        return unit invoke f get m val
+      end
+  end
+
+implement Applicative for Maybe
+  begin
+    fn ap Maybe mf Maybe mx returns Maybe
+      begin
+        if equal get mf present 0 begin
+          return nothing
+        end
+        return maybe_map mx get mf val
+      end
+  end
+
+implement Monad for Maybe
+  begin
+    fn bind Maybe m int f returns Maybe
+      begin
+        if equal get m present 0 begin
+          return nothing
+        end
+        return invoke f get m val
+      end
+  end
+
+rem Function marker traits
+implement Bind for mbind
+implement Unit for unit
+implement Map for maybe_map
+
+precedence >>=
+
+use MaybeMonad
+  rem Chain of two bind operations using >>= sigil
+  let x unit 5
+  let result x >>= lambda int a returns Maybe begin return unit multiply a 2 end >>= lambda int b returns Maybe begin return unit add b 1 end
+  print get result val

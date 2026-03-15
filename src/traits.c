@@ -153,9 +153,15 @@ bool trait_check_all(TraitRegistry *tr) {
         if (!trait_check_prerequisites(tr, impl->trait_name, impl->concrete_type))
             ok = false;
 
+        /* Built-in traits (__builtin__) skip the orphan rule —
+         * any algebra may implement them for any type it defines. */
+        const char *builtin_str = intern_cstr(tr->intern_tab, "__builtin__");
+        bool is_builtin_trait = (def->source_algebra == builtin_str);
+
         /* Orphan rule: impl must be in the algebra that defines the trait
          * or the algebra that defines the type. */
-        if (impl->source_algebra && def->source_algebra &&
+        if (!is_builtin_trait &&
+            impl->source_algebra && def->source_algebra &&
             impl->source_algebra != def->source_algebra) {
             /* Impl is in a different algebra than the trait.
              * Check if the impl's algebra defines the concrete type. */
