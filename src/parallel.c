@@ -384,13 +384,29 @@ static void select_comprehension_strategy(MechanismSelector *ms, ASTNode *node) 
     bool has_filter = (node->comprehension.comp_filter != NULL);
     bool pure = ms->current_pure;
 
+    /* Detect nested comprehension pattern: matrix multiply candidate.
+     * Outer comprehension's transform is another comprehension whose
+     * transform calls a reduction function, in a pure algebra with a
+     * distributive declaration. This is the algebraic signature of
+     * C[i][j] = sum_k A[i][k] * B[k][j]. */
+    bool nested_comp = (node->comprehension.comp_transform &&
+                        node->comprehension.comp_transform->kind == NODE_COMPREHENSION);
+    bool has_distributive = false;
+    for (int i = 0; i < ms->algebra_reg->algebras.count; i++) {
+        if (ms->algebra_reg->algebras.items[i]->distributive_count > 0) {
+            has_distributive = true;
+            break;
+        }
+    }
+
     ParallelAnnotation *ann = make_annotation(ms, PAR_PTHREAD);
 
-    if (has_filter) {
-        /* Filter means unpredictable work → work stealing */
+    if (nested_comp && pure && has_distributive && !has_filter) {
+        /* Matrix multiply pattern → AMX / Accelerate BLAS */
+        ann->strategy = PAR_AMX;
+    } else if (has_filter) {
         ann->strategy = PAR_WORK_STEALING;
     } else if (pure) {
-        /* Pure + no filter → could go SIMD or GPU */
         ann->strategy = PAR_SIMD;
     } else {
         ann->strategy = PAR_PTHREAD;

@@ -38,7 +38,15 @@
 - **Files**: `src/desugarer.c` (precedence climbing / postfix handling)
 - **Status**: Open
 
----
+### BUG-014: Dense integer-keyed maps should be lowered to contiguous arrays in codegen
+- **Discovered**: 2026-03-14, during AMX matrix multiply optimization
+- **Category**: Codegen
+- **Severity**: Low (optimization, not a correctness bug)
+- **Description**: Sigil's only collection primitive is `map`, backed by hash tables. When a map has dense integer keys 0..N-1 (constructed by `range`, `collect`, sequential `set`, or `row`/`matrix` constructors), every element access pays hash computation + bucket traversal (~50-200ns) for what should be a direct array index (~1-5ns). This is the dominant performance cost in most Sigil programs — the AMX matrix multiply achieved 950x speedup largely by extracting SigilMap data into contiguous `double[]` before computing.
+- **Proposed fix**: Add a compilation pass after type checking that detects maps with provably dense integer keys and emits `int64_t[]` (or `double[]`, `SigilVal[]`) instead of `SigilMap*` in the generated C. Detection criteria: map constructed by `collect from i in range`, sequential `set` in a for-loop, `mapnew` followed only by sequential integer-keyed `set` calls, or `row`/`matrix` constructors. When lowered, `get`/`set` emit direct array indexing, `mapcount`/`length` emit the stored size, and `for k in m` emits a simple counted loop. Maps that escape to unknown contexts or receive non-sequential keys fall back to `SigilMap*`.
+- **Impact**: Would eliminate extraction/reconstruction overhead in AMX/SIMD paths, make all comprehension strategies faster, and bring sequential Sigil performance close to C for array-oriented code.
+- **Files**: `src/c_emitter.c` (type inference + emission), potentially a new `src/array_lowering.c` pass
+- **Status**: Open (optimization — low priority)
 
 ---
 
@@ -46,4 +54,4 @@
 
 ---
 
-Next valid BUG ID: BUG-014
+Next valid BUG ID: BUG-015

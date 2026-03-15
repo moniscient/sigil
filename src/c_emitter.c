@@ -982,9 +982,118 @@ static void emit_comp_simd(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) 
     emit_comp_sequential(e, node, ann);
 }
 
-/* Future: emit AMX tiled transform for matrix element operations. */
+/* AMX / Accelerate BLAS matrix multiply.
+ * Pattern-matches the nested comprehension:
+ *   collect from i in range(0, rows) apply
+ *     collect from j in range(0, cols) apply
+ *       dot(A, i, B, j, n)
+ * Extracts matrices from SigilMap into contiguous double arrays,
+ * calls cblas_dgemm (which uses AMX on Apple Silicon), and
+ * rebuilds the result SigilMap.  Falls back to sequential if the
+ * pattern doesn't match. */
 static void emit_comp_amx(CEmitter *e, ASTNode *node, ParallelAnnotation *ann) {
-    emit_comp_sequential(e, node, ann);
+    /* Verify nested comprehension pattern */
+    if (!node->comprehension.comp_transform ||
+        node->comprehension.comp_transform->kind != NODE_COMPREHENSION) {
+        emit_comp_sequential(e, node, ann);
+        return;
+    }
+    ASTNode *inner = node->comprehension.comp_transform;
+    ASTNode *dot_call = inner->comprehension.comp_transform;
+
+    /* Inner transform must be a function call with at least 5 args:
+     * dot(matrix_a, row_var, matrix_b, col_var, shared_dim) */
+    if (!dot_call || dot_call->kind != NODE_CALL || dot_call->call.args.count < 5) {
+        emit_comp_sequential(e, node, ann);
+        return;
+    }
+
+    /* Extract matrix identifiers from the call args */
+    ASTNode *mat_a_node = dot_call->call.args.items[0];
+    ASTNode *mat_b_node = dot_call->call.args.items[2];
+    ASTNode *dim_n_node = dot_call->call.args.items[4];
+    if (!mat_a_node || mat_a_node->kind != NODE_IDENT ||
+        !mat_b_node || mat_b_node->kind != NODE_IDENT) {
+        emit_comp_sequential(e, node, ann);
+        return;
+    }
+    const char *mat_a = mat_a_node->ident.ident;
+    const char *mat_b = mat_b_node->ident.ident;
+
+    /* Extract dimension upper bounds from range(0, N) sources */
+    ASTNode *outer_src = node->comprehension.comp_source;
+    ASTNode *inner_src = inner->comprehension.comp_source;
+    bool outer_range = (outer_src->kind == NODE_CALL &&
+                        strcmp(outer_src->call.call_name, "range") == 0 &&
+                        outer_src->call.args.count >= 2);
+    bool inner_range = (inner_src->kind == NODE_CALL &&
+                        strcmp(inner_src->call.call_name, "range") == 0 &&
+                        inner_src->call.args.count >= 2);
+    if (!outer_range || !inner_range) {
+        emit_comp_sequential(e, node, ann);
+        return;
+    }
+
+    /* Emit AMX/BLAS matrix multiply as GCC statement expression */
+    fprintf(e->out, "/* PAR_STRATEGY: AMX [pure] — Accelerate cblas_dgemm */ ");
+    fprintf(e->out, "({\n");
+
+    /* Dimension variables */
+    fprintf(e->out, "int64_t _amx_rows = ");
+    emit_expr(e, outer_src->call.args.items[1]);
+    fprintf(e->out, ";\n");
+
+    fprintf(e->out, "int64_t _amx_cols = ");
+    emit_expr(e, inner_src->call.args.items[1]);
+    fprintf(e->out, ";\n");
+
+    fprintf(e->out, "int64_t _amx_n = ");
+    emit_expr(e, dim_n_node);
+    fprintf(e->out, ";\n");
+
+    /* Extract matrix A into contiguous double array */
+    fprintf(e->out, "double *_amx_A = (double *)malloc(_amx_rows * _amx_n * sizeof(double));\n");
+    fprintf(e->out, "for (int64_t _ai = 0; _ai < _amx_rows; _ai++) {\n");
+    fprintf(e->out, "  SigilMap *_arow = sigil_unbox_map(sigil_map_get(%s, sigil_val_int(_ai)));\n", mat_a);
+    fprintf(e->out, "  for (int64_t _aj = 0; _aj < _amx_n; _aj++)\n");
+    fprintf(e->out, "    _amx_A[_ai * _amx_n + _aj] = (double)sigil_unbox_int(sigil_map_get(_arow, sigil_val_int(_aj)));\n");
+    fprintf(e->out, "}\n");
+
+    /* Extract matrix B into contiguous double array */
+    fprintf(e->out, "double *_amx_B = (double *)malloc(_amx_n * _amx_cols * sizeof(double));\n");
+    fprintf(e->out, "for (int64_t _bi = 0; _bi < _amx_n; _bi++) {\n");
+    fprintf(e->out, "  SigilMap *_brow = sigil_unbox_map(sigil_map_get(%s, sigil_val_int(_bi)));\n", mat_b);
+    fprintf(e->out, "  for (int64_t _bj = 0; _bj < _amx_cols; _bj++)\n");
+    fprintf(e->out, "    _amx_B[_bi * _amx_cols + _bj] = (double)sigil_unbox_int(sigil_map_get(_brow, sigil_val_int(_bj)));\n");
+    fprintf(e->out, "}\n");
+
+    /* Multiply: cblas_dgemm on Apple, tiled loop elsewhere */
+    fprintf(e->out, "double *_amx_C = (double *)calloc(_amx_rows * _amx_cols, sizeof(double));\n");
+    fprintf(e->out, "#ifdef __APPLE__\n");
+    fprintf(e->out, "cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,\n");
+    fprintf(e->out, "  (int)_amx_rows, (int)_amx_cols, (int)_amx_n, 1.0,\n");
+    fprintf(e->out, "  _amx_A, (int)_amx_n, _amx_B, (int)_amx_cols, 0.0, _amx_C, (int)_amx_cols);\n");
+    fprintf(e->out, "#else\n");
+    fprintf(e->out, "for (int64_t _ci = 0; _ci < _amx_rows; _ci++)\n");
+    fprintf(e->out, "  for (int64_t _ck = 0; _ck < _amx_n; _ck++) {\n");
+    fprintf(e->out, "    double _a_ik = _amx_A[_ci * _amx_n + _ck];\n");
+    fprintf(e->out, "    for (int64_t _cj = 0; _cj < _amx_cols; _cj++)\n");
+    fprintf(e->out, "      _amx_C[_ci * _amx_cols + _cj] += _a_ik * _amx_B[_ck * _amx_cols + _cj];\n");
+    fprintf(e->out, "  }\n");
+    fprintf(e->out, "#endif\n");
+
+    /* Rebuild result SigilMap from contiguous array */
+    fprintf(e->out, "SigilMap *_amx_result = sigil_map_new();\n");
+    fprintf(e->out, "for (int64_t _ri = 0; _ri < _amx_rows; _ri++) {\n");
+    fprintf(e->out, "  SigilMap *_rrow = sigil_map_new();\n");
+    fprintf(e->out, "  for (int64_t _rj = 0; _rj < _amx_cols; _rj++)\n");
+    fprintf(e->out, "    sigil_map_set(_rrow, sigil_val_int(_rj), sigil_val_int((int64_t)_amx_C[_ri * _amx_cols + _rj]));\n");
+    fprintf(e->out, "  sigil_map_set(_amx_result, sigil_val_int(_ri), sigil_val_map(_rrow));\n");
+    fprintf(e->out, "}\n");
+
+    /* Cleanup */
+    fprintf(e->out, "free(_amx_A); free(_amx_B); free(_amx_C);\n");
+    fprintf(e->out, "_amx_result; })");
 }
 
 /* Future: emit Metal compute kernel for massively parallel transform. */
@@ -3501,6 +3610,11 @@ void c_emit(CEmitter *e, ASTNode *node) {
     fprintf(e->out, "#include <stdint.h>\n");
     fprintf(e->out, "#include <stdbool.h>\n");
     fprintf(e->out, "#include <stdio.h>\n");
+    fprintf(e->out, "#include <stdlib.h>\n");
+    fprintf(e->out, "#ifdef __APPLE__\n");
+    fprintf(e->out, "#define ACCELERATE_NEW_LAPACK\n");
+    fprintf(e->out, "#include <Accelerate/Accelerate.h>\n");
+    fprintf(e->out, "#endif\n");
     fprintf(e->out, "#include \"sigil_runtime.h\"\n");
     fprintf(e->out, "#include \"sigil_thunk.h\"\n");
     fprintf(e->out, "#include \"sigil_executor.h\"\n");
